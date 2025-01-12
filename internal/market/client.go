@@ -1,0 +1,188 @@
+package market
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+)
+
+// Client는 바이낸스 API 클라이언트를 구현합니다
+type Client struct {
+	apiKey     string
+	secretKey  string
+	baseURL    string
+	httpClient *http.Client
+}
+
+// ClientOption은 클라이언트 생성 옵션을 정의합니다
+type ClientOption func(*Client)
+
+// WithTimeout은 HTTP 클라이언트의 타임아웃을 설정합니다
+func WithTimeout(timeout time.Duration) ClientOption {
+	return func(c *Client) {
+		c.httpClient.Timeout = timeout
+	}
+}
+
+// WithBaseURL은 기본 URL을 설정합니다
+func WithBaseURL(baseURL string) ClientOption {
+	return func(c *Client) {
+		c.baseURL = baseURL
+	}
+}
+
+// NewClient는 새로운 바이낸스 API 클라이언트를 생성합니다
+func NewClient(apiKey, secretKey string, opts ...ClientOption) *Client {
+	c := &Client{
+		apiKey:     apiKey,
+		secretKey:  secretKey,
+		baseURL:    "https://fapi.binance.com", // 기본값은 선물 거래소
+		httpClient: &http.Client{Timeout: 10 * time.Second},
+	}
+
+	// 옵션 적용
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
+}
+
+// sign은 요청에 대한 서명을 생성합니다
+func (c *Client) sign(payload string) string {
+	h := hmac.New(sha256.New, []byte(c.secretKey))
+	h.Write([]byte(payload))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// doRequest는 HTTP 요청을 실행하고 결과를 반환합니다
+func (c *Client) doRequest(ctx context.Context, method, endpoint string, params url.Values, needSign bool) ([]byte, error) {
+	// URL 생성
+	reqURL, err := url.Parse(c.baseURL + endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("URL 파싱 실패: %w", err)
+	}
+
+	// 타임스탬프 추가
+	if needSign {
+		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
+		params.Add("timestamp", timestamp)
+	}
+
+	// 파라미터 설정
+	reqURL.RawQuery = params.Encode()
+
+	// 서명 추가
+	if needSign {
+		signature := c.sign(params.Encode())
+		reqURL.RawQuery = reqURL.RawQuery + "&signature=" + signature
+	}
+
+	// 요청 생성
+	req, err := http.NewRequestWithContext(ctx, method, reqURL.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("요청 생성 실패: %w", err)
+	}
+
+	// 헤더 설정
+	req.Header.Set("Content-Type", "application/json")
+	if needSign {
+		req.Header.Set("X-MBX-APIKEY", c.apiKey)
+	}
+
+	// 요청 실행
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("API 요청 실패: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 응답 읽기
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("응답 읽기 실패: %w", err)
+	}
+
+	// 상태 코드 확인
+	if resp.StatusCode != http.StatusOK {
+		var apiErr struct {
+			Code    int    `json:"code"`
+			Message string `json:"msg"`
+		}
+		if err := json.Unmarshal(body, &apiErr); err != nil {
+			return nil, fmt.Errorf("HTTP 에러(%d): %s", resp.StatusCode, string(body))
+		}
+		return nil, fmt.Errorf("API 에러(코드: %d): %s", apiErr.Code, apiErr.Message)
+	}
+
+	return body, nil
+}
+
+// GetServerTime은 서버 시간을 조회합니다
+func (c *Client) GetServerTime(ctx context.Context) (time.Time, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/time", nil, false)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	var result struct {
+		ServerTime int64 `json:"serverTime"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return time.Time{}, fmt.Errorf("서버 시간 파싱 실패: %w", err)
+	}
+
+	return time.Unix(0, result.ServerTime*int64(time.Millisecond)), nil
+}
+
+// GetKlines는 캔들 데이터를 조회합니다
+func (c *Client) GetKlines(ctx context.Context, symbol, interval string, limit int) ([]CandleData, error) {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("interval", interval)
+	params.Add("limit", strconv.Itoa(limit))
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/klines", params, false)
+	if err != nil {
+		return nil, err
+	}
+
+	var rawCandles [][]interface{}
+	if err := json.Unmarshal(resp, &rawCandles); err != nil {
+		return nil, fmt.Errorf("캔들 데이터 파싱 실패: %w", err)
+	}
+
+	candles := make([]CandleData, len(rawCandles))
+	for i, raw := range rawCandles {
+		candles[i] = CandleData{
+			OpenTime:  int64(raw[0].(float64)),
+			CloseTime: int64(raw[6].(float64)),
+		}
+		// 숫자 문자열을 float64로 변환
+		if open, err := strconv.ParseFloat(raw[1].(string), 64); err == nil {
+			candles[i].Open = open
+		}
+		if high, err := strconv.ParseFloat(raw[2].(string), 64); err == nil {
+			candles[i].High = high
+		}
+		if low, err := strconv.ParseFloat(raw[3].(string), 64); err == nil {
+			candles[i].Low = low
+		}
+		if close, err := strconv.ParseFloat(raw[4].(string), 64); err == nil {
+			candles[i].Close = close
+		}
+		if volume, err := strconv.ParseFloat(raw[5].(string), 64); err == nil {
+			candles[i].Volume = volume
+		}
+	}
+
+	return candles, nil
+}
