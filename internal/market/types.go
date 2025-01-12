@@ -1,5 +1,22 @@
 package market
 
+import "fmt"
+
+// APIError는 바이낸스 API 에러를 표현합니다
+type APIError struct {
+	Code    int    `json:"code"`
+	Message string `json:"msg"`
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("바이낸스 API 에러(코드: %d): %s", e.Code, e.Message)
+}
+
+// 에러 코드 상수 정의
+const (
+	ErrPositionModeNoChange = -4059 // 포지션 모드 변경 불필요 에러
+)
+
 // CandleData는 캔들 데이터를 표현합니다
 type CandleData struct {
 	OpenTime            int64   `json:"openTime"`
@@ -59,4 +76,20 @@ type OrderRequest struct {
 	Price        float64
 	StopPrice    float64
 	TimeInForce  string
+}
+
+// OrderResponse는 주문 응답을 표현합니다
+type OrderResponse struct {
+	OrderID          int64        `json:"orderId"`
+	Symbol           string       `json:"symbol"`
+	Status           string       `json:"status"`
+	ClientOrderID    string       `json:"clientOrderId"`
+	Price            float64      `json:"price,string"`
+	AvgPrice         float64      `json:"avgPrice,string"`
+	OrigQuantity     float64      `json:"origQty,string"`
+	ExecutedQuantity float64      `json:"executedQty,string"`
+	Side             string       `json:"side"`
+	PositionSide     PositionSide `json:"positionSide"`
+	Type             string       `json:"type"`
+	CreateTime       int64        `json:"time"`
 }

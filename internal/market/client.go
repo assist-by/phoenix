@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -185,4 +186,152 @@ func (c *Client) GetKlines(ctx context.Context, symbol, interval string, limit i
 	}
 
 	return candles, nil
+}
+
+// GetBalance는 계정의 잔고를 조회합니다
+func (c *Client) GetBalance(ctx context.Context) (map[string]Balance, error) {
+	params := url.Values{}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v2/account", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("잔고 조회 실패: %w", err)
+	}
+
+	var result struct {
+		Assets []struct {
+			Asset            string  `json:"asset"`
+			WalletBalance    float64 `json:"walletBalance,string"`
+			UnrealizedProfit float64 `json:"unrealizedProfit,string"`
+			MarginBalance    float64 `json:"marginBalance,string"`
+			AvailableBalance float64 `json:"availableBalance,string"`
+		} `json:"assets"`
+	}
+
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("응답 파싱 실패: %w", err)
+	}
+
+	balances := make(map[string]Balance)
+	for _, asset := range result.Assets {
+		if asset.WalletBalance > 0 {
+			balances[asset.Asset] = Balance{
+				Asset:              asset.Asset,
+				Available:          asset.AvailableBalance,
+				Locked:             asset.WalletBalance - asset.AvailableBalance,
+				CrossWalletBalance: asset.WalletBalance,
+			}
+		}
+	}
+
+	return balances, nil
+}
+
+// PlaceOrder는 새로운 주문을 생성합니다
+func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
+	params := url.Values{}
+	params.Add("symbol", order.Symbol)
+	params.Add("side", string(order.Side))
+	params.Add("type", string(order.Type))
+	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+
+	if order.PositionSide != "" {
+		params.Add("positionSide", string(order.PositionSide))
+	}
+
+	if order.Price > 0 {
+		params.Add("price", strconv.FormatFloat(order.Price, 'f', -1, 64))
+	}
+
+	if order.StopPrice > 0 {
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+	}
+
+	if order.TimeInForce != "" {
+		params.Add("timeInForce", order.TimeInForce)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("주문 실행 실패: %w", err)
+	}
+
+	var result OrderResponse
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("주문 응답 파싱 실패: %w", err)
+	}
+
+	return &result, nil
+}
+
+// PlaceTPSLOrder는 손절/익절 주문을 생성합니다
+func (c *Client) PlaceTPSLOrder(ctx context.Context, mainOrder *OrderResponse, stopLoss, takeProfit float64) error {
+	if stopLoss > 0 {
+		slOrder := OrderRequest{
+			Symbol:       mainOrder.Symbol,
+			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
+			Type:         StopMarket,
+			Quantity:     mainOrder.ExecutedQuantity,
+			StopPrice:    stopLoss,
+			PositionSide: mainOrder.PositionSide,
+		}
+		if _, err := c.PlaceOrder(ctx, slOrder); err != nil {
+			return fmt.Errorf("손절 주문 실패: %w", err)
+		}
+	}
+
+	if takeProfit > 0 {
+		tpOrder := OrderRequest{
+			Symbol:       mainOrder.Symbol,
+			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
+			Type:         TakeProfitMarket,
+			Quantity:     mainOrder.ExecutedQuantity,
+			StopPrice:    takeProfit,
+			PositionSide: mainOrder.PositionSide,
+		}
+		if _, err := c.PlaceOrder(ctx, tpOrder); err != nil {
+			return fmt.Errorf("익절 주문 실패: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// SetLeverage는 레버리지를 설정합니다
+func (c *Client) SetLeverage(ctx context.Context, symbol string, leverage int) error {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("leverage", strconv.Itoa(leverage))
+
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/leverage", params, true)
+	if err != nil {
+		return fmt.Errorf("레버리지 설정 실패: %w", err)
+	}
+
+	return nil
+}
+
+// SetPositionMode는 포지션 모드를 설정합니다
+func (c *Client) SetPositionMode(ctx context.Context, hedgeMode bool) error {
+	params := url.Values{}
+	params.Add("dualSidePosition", strconv.FormatBool(hedgeMode))
+
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/positionSide/dual", params, true)
+	if err != nil {
+		// API 에러 타입 확인
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.Code == ErrPositionModeNoChange {
+			return nil // 이미 원하는 모드로 설정된 경우
+		}
+		return fmt.Errorf("포지션 모드 설정 실패: %w", err)
+	}
+
+	return nil
+}
+
+// getOppositeOrderSide는 주문의 반대 방향을 반환합니다
+func getOppositeOrderSide(side OrderSide) OrderSide {
+	if side == Buy {
+		return Sell
+	}
+	return Buy
 }
