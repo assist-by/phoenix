@@ -27,9 +27,7 @@ type Collector struct {
 	fetchInterval time.Duration
 	candleLimit   int
 	retry         RetryConfig
-	stopChan      chan struct{}
-	mu            sync.RWMutex
-	isRunning     bool
+	mu            sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
@@ -39,13 +37,13 @@ func NewCollector(client *Client, discord *discord.Client, fetchInterval time.Du
 		discord:       discord,
 		fetchInterval: fetchInterval,
 		candleLimit:   candleLimit,
+		mu:            sync.Mutex{},
 		retry: RetryConfig{
 			MaxRetries: 3,
 			BaseDelay:  1 * time.Second,
 			MaxDelay:   30 * time.Second,
 			Factor:     2.0,
 		},
-		stopChan: make(chan struct{}),
 	}
 
 	for _, opt := range opts {
@@ -57,13 +55,6 @@ func NewCollector(client *Client, discord *discord.Client, fetchInterval time.Du
 
 // CollectorOption은 수집기의 옵션을 정의합니다
 type CollectorOption func(*Collector)
-
-// WithFetchInterval은 데이터 수집 간격을 설정합니다
-func WithFetchInterval(interval time.Duration) CollectorOption {
-	return func(c *Collector) {
-		c.fetchInterval = interval
-	}
-}
 
 // WithCandleLimit은 캔들 데이터 조회 개수를 설정합니다
 func WithCandleLimit(limit int) CollectorOption {
@@ -79,57 +70,12 @@ func WithRetryConfig(config RetryConfig) CollectorOption {
 	}
 }
 
-// Start는 데이터 수집을 시작합니다
-func (c *Collector) Start(ctx context.Context) error {
-	c.mu.Lock()
-	if c.isRunning {
-		c.mu.Unlock()
-		return fmt.Errorf("수집기가 이미 실행 중입니다")
-	}
-	c.isRunning = true
-	c.mu.Unlock()
-
-	// 상위 거래량 심볼 조회 및 데이터 수집 시작
-	go c.run(ctx)
-
-	return nil
-}
-
-// Stop은 데이터 수집을 중지합니다
-func (c *Collector) Stop() {
+// collect는 한 번의 데이터 수집 사이클을 수행합니다
+func (c *Collector) Collect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.isRunning {
-		close(c.stopChan)
-		c.isRunning = false
-	}
-}
-
-// run은 실제 데이터 수집 작업을 수행합니다
-func (c *Collector) run(ctx context.Context) {
-	ticker := time.NewTicker(c.fetchInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Println("컨텍스트 취소로 수집기를 종료합니다")
-			return
-		case <-c.stopChan:
-			log.Println("수집기를 중지합니다")
-			return
-		case <-ticker.C:
-			if err := c.collect(ctx); err != nil {
-				log.Printf("데이터 수집 중 에러 발생: %v", err)
-			}
-		}
-	}
-}
-
-// collect는 한 번의 데이터 수집 사이클을 수행합니다
-func (c *Collector) collect(ctx context.Context) error {
-	// 상위 거래량 심볼 조회
+	// 이하 collect() 함수의 내용을 그대로 사용
 	var symbols []string
 	err := c.withRetry(ctx, "상위 거래량 심볼 조회", func() error {
 		var err error
@@ -137,7 +83,7 @@ func (c *Collector) collect(ctx context.Context) error {
 		return err
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
 	}
 
 	// 각 심볼의 잔고 조회

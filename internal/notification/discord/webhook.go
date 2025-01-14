@@ -52,7 +52,7 @@ func (c *Client) SendInfo(message string) error {
 		Embeds: []Embed{*embed},
 	}
 
-	return c.sendToWebhook(c.tradeWebhook, msg)
+	return c.sendToWebhook(c.infoWebhook, msg)
 }
 
 // SendTradeInfo는 거래 실행 정보를 전송합니다
