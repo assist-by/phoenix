@@ -15,15 +15,18 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // Client는 바이낸스 API 클라이언트를 구현합니다
 type Client struct {
-	apiKey     string
-	secretKey  string
-	baseURL    string
-	httpClient *http.Client
+	apiKey           string
+	secretKey        string
+	baseURL          string
+	httpClient       *http.Client
+	serverTimeOffset int64 // 서버 시간과의 차이를 저장
+	mu               sync.RWMutex
 }
 
 // ClientOption은 클라이언트 생성 옵션을 정의합니다
@@ -69,6 +72,10 @@ func (c *Client) sign(payload string) string {
 
 // doRequest는 HTTP 요청을 실행하고 결과를 반환합니다
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, params url.Values, needSign bool) ([]byte, error) {
+	if params == nil {
+		params = url.Values{}
+	}
+
 	// URL 생성
 	reqURL, err := url.Parse(c.baseURL + endpoint)
 	if err != nil {
@@ -77,8 +84,11 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, params 
 
 	// 타임스탬프 추가
 	if needSign {
-		timestamp := strconv.FormatInt(time.Now().UnixMilli(), 10)
-		params.Add("timestamp", timestamp)
+		// 서버 시간으로 타임스탬프 설정
+		timestamp := strconv.FormatInt(c.getServerTime(), 10)
+		params.Set("timestamp", timestamp)
+		// recvWindow 설정 (선택적)
+		params.Set("recvWindow", "5000")
 	}
 
 	// 파라미터 설정
@@ -386,4 +396,32 @@ func (c *Client) GetTopVolumeSymbols(ctx context.Context, n int) ([]string, erro
 	}
 
 	return symbols, nil
+}
+
+// SyncTime은 바이낸스 서버와 시간을 동기화합니다
+func (c *Client) SyncTime(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/time", nil, false)
+	if err != nil {
+		return fmt.Errorf("서버 시간 조회 실패: %w", err)
+	}
+
+	var result struct {
+		ServerTime int64 `json:"serverTime"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return fmt.Errorf("서버 시간 파싱 실패: %w", err)
+	}
+
+	c.serverTimeOffset = result.ServerTime - time.Now().UnixMilli()
+	return nil
+}
+
+// getServerTime은 현재 서버 시간을 반환합니다
+func (c *Client) getServerTime() int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return time.Now().UnixMilli() + c.serverTimeOffset
 }

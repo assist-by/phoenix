@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -63,12 +64,24 @@ func main() {
 		log.Printf("시작 알림 전송 실패: %v", err)
 	}
 
+	// 컨텍스트 생성
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// 바이낸스 클라이언트 생성
 	binanceClient := market.NewClient(
 		cfg.Binance.APIKey,
 		cfg.Binance.SecretKey,
 		market.WithTimeout(10*time.Second),
 	)
+	// 바이낸스 서버와 시간 동기화
+	if err := binanceClient.SyncTime(ctx); err != nil {
+		log.Printf("바이낸스 서버 시간 동기화 실패: %v", err)
+		if err := discordClient.SendError(fmt.Errorf("바이낸스 서버 시간 동기화 실패: %w", err)); err != nil {
+			log.Printf("에러 알림 전송 실패: %v", err)
+		}
+		os.Exit(1)
+	}
 
 	// 데이터 수집기 생성
 	collector := market.NewCollector(
@@ -92,10 +105,6 @@ func main() {
 
 	// 스케줄러 생성 (fetchInterval)
 	scheduler := scheduler.NewScheduler(cfg.App.FetchInterval, task)
-
-	// 컨텍스트 생성
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	// 시그널 처리
 	sigChan := make(chan os.Signal, 1)
