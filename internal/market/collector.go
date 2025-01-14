@@ -8,16 +8,51 @@ import (
 	"log"
 	"sync"
 	"time"
+
+	"github.com/assist-by/phoenix/internal/notification/discord"
 )
+
+// RetryConfig는 재시도 설정을 정의합니다
+type RetryConfig struct {
+	MaxRetries int           // 최대 재시도 횟수
+	BaseDelay  time.Duration // 기본 대기 시간
+	MaxDelay   time.Duration // 최대 대기 시간
+	Factor     float64       // 대기 시간 증가 계수
+}
 
 // Collector는 시장 데이터 수집기를 구현합니다
 type Collector struct {
 	client        *Client
+	discord       *discord.Client
 	fetchInterval time.Duration
 	candleLimit   int
+	retry         RetryConfig
 	stopChan      chan struct{}
 	mu            sync.RWMutex
 	isRunning     bool
+}
+
+// NewCollector는 새로운 데이터 수집기를 생성합니다
+func NewCollector(client *Client, discord *discord.Client, opts ...CollectorOption) *Collector {
+	c := &Collector{
+		client:        client,
+		discord:       discord,
+		fetchInterval: 15 * time.Minute,
+		candleLimit:   100,
+		retry: RetryConfig{
+			MaxRetries: 3,
+			BaseDelay:  1 * time.Second,
+			MaxDelay:   30 * time.Second,
+			Factor:     2.0,
+		},
+		stopChan: make(chan struct{}),
+	}
+
+	for _, opt := range opts {
+		opt(c)
+	}
+
+	return c
 }
 
 // CollectorOption은 수집기의 옵션을 정의합니다
@@ -37,20 +72,11 @@ func WithCandleLimit(limit int) CollectorOption {
 	}
 }
 
-// NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, opts ...CollectorOption) *Collector {
-	c := &Collector{
-		client:        client,
-		fetchInterval: 15 * time.Minute, // 기본값 15분
-		candleLimit:   100,              // 기본값 100개
-		stopChan:      make(chan struct{}),
+// WithRetryConfig는 재시도 설정을 지정합니다
+func WithRetryConfig(config RetryConfig) CollectorOption {
+	return func(c *Collector) {
+		c.retry = config
 	}
-
-	for _, opt := range opts {
-		opt(c)
-	}
-
-	return c
 }
 
 // Start는 데이터 수집을 시작합니다
@@ -104,35 +130,57 @@ func (c *Collector) run(ctx context.Context) {
 // collect는 한 번의 데이터 수집 사이클을 수행합니다
 func (c *Collector) collect(ctx context.Context) error {
 	// 상위 거래량 심볼 조회
-	symbols, err := c.client.GetTopVolumeSymbols(ctx, 3) // 상위 3개 심볼 조회
+	var symbols []string
+	err := c.withRetry(ctx, "상위 거래량 심볼 조회", func() error {
+		var err error
+		symbols, err = c.client.GetTopVolumeSymbols(ctx, 3)
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+		return err
 	}
 
 	// 각 심볼의 잔고 조회
-	balances, err := c.client.GetBalance(ctx)
+	var balances map[string]Balance
+	err = c.withRetry(ctx, "잔고 조회", func() error {
+		var err error
+		balances, err = c.client.GetBalance(ctx)
+		return err
+	})
 	if err != nil {
-		return fmt.Errorf("잔고 조회 실패: %w", err)
+		return err
 	}
 
-	log.Printf("현재 보유 잔고:")
+	// 잔고 정보 로깅 및 알림
+	balanceInfo := "현재 보유 잔고:\n"
 	for asset, balance := range balances {
 		if balance.Available > 0 || balance.Locked > 0 {
-			log.Printf("%s: 사용가능: %.8f, 잠금: %.8f",
+			balanceInfo += fmt.Sprintf("%s: 사용가능: %.8f, 잠금: %.8f\n",
 				asset, balance.Available, balance.Locked)
+		}
+	}
+	if c.discord != nil {
+		if err := c.discord.SendInfo(balanceInfo); err != nil {
+			log.Printf("잔고 정보 알림 전송 실패: %v", err)
 		}
 	}
 
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
-		candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
+		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
+			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
+			if err != nil {
+				return err
+			}
+
+			log.Printf("%s 심볼의 캔들 데이터 %d개 수집 완료", symbol, len(candles))
+			// TODO: 수집된 데이터 처리 (시그널 생성 또는 저장)
+			return nil
+		})
 		if err != nil {
-			log.Printf("%s 심볼의 캔들 데이터 조회 실패: %v", symbol, err)
+			log.Printf("%s 심볼 데이터 수집 실패: %v", symbol, err)
 			continue
 		}
-
-		log.Printf("%s 심볼의 캔들 데이터 %d개 수집 완료", symbol, len(candles))
-		// TODO: 수집된 데이터 처리 (데이터베이스 저장 또는 시그널 생성)
 	}
 
 	return nil
@@ -168,4 +216,49 @@ func (c *Collector) getIntervalString() string {
 	default:
 		return "15m" // 기본값
 	}
+}
+
+// withRetry는 재시도 로직을 구현한 래퍼 함수입니다
+func (c *Collector) withRetry(ctx context.Context, operation string, fn func() error) error {
+	var lastErr error
+	delay := c.retry.BaseDelay
+
+	for attempt := 0; attempt <= c.retry.MaxRetries; attempt++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			if err := fn(); err != nil {
+				lastErr = err
+				if attempt == c.retry.MaxRetries {
+					// 마지막 시도에서 실패하면 Discord로 에러 알림 전송
+					errMsg := fmt.Errorf("%s 실패 (최대 재시도 횟수 초과): %v", operation, err)
+					if c.discord != nil {
+						if notifyErr := c.discord.SendError(errMsg); notifyErr != nil {
+							log.Printf("Discord 에러 알림 전송 실패: %v", notifyErr)
+						}
+					}
+					return fmt.Errorf("최대 재시도 횟수 초과: %w", lastErr)
+				}
+
+				log.Printf("%s 실패 (attempt %d/%d): %v",
+					operation, attempt+1, c.retry.MaxRetries, err)
+
+				// 다음 재시도 전 대기
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
+					// 대기 시간을 증가시키되, 최대 대기 시간을 넘지 않도록 함
+					delay = time.Duration(float64(delay) * c.retry.Factor)
+					if delay > c.retry.MaxDelay {
+						delay = c.retry.MaxDelay
+					}
+				}
+				continue
+			}
+			return nil
+		}
+	}
+	return lastErr
 }

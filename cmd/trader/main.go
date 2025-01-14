@@ -23,6 +23,7 @@ func main() {
 		cfg.Discord.SignalWebhook,
 		cfg.Discord.TradeWebhook,
 		cfg.Discord.ErrorWebhook,
+		cfg.Discord.InfoWebhook,
 		discord.WithTimeout(10*time.Second),
 	)
 
