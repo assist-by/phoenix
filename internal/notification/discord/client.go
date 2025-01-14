@@ -13,6 +13,7 @@ type Client struct {
 	signalWebhook string // 시그널 알림용 웹훅
 	tradeWebhook  string // 거래 실행 알림용 웹훅
 	errorWebhook  string // 에러 알림용 웹훅
+	infoWebhook   string // 정보 알림용 웹훅
 	client        *http.Client
 }
 
@@ -27,11 +28,12 @@ func WithTimeout(timeout time.Duration) ClientOption {
 }
 
 // NewClient는 새로운 Discord 클라이언트를 생성합니다
-func NewClient(signalWebhook, tradeWebhook, errorWebhook string, opts ...ClientOption) *Client {
+func NewClient(signalWebhook, tradeWebhook, errorWebhook, infoWebhook string, opts ...ClientOption) *Client {
 	c := &Client{
 		signalWebhook: signalWebhook,
 		tradeWebhook:  tradeWebhook,
 		errorWebhook:  errorWebhook,
+		infoWebhook:   infoWebhook,
 		client:        &http.Client{Timeout: 10 * time.Second},
 	}
 

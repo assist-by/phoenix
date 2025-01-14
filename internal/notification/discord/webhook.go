@@ -14,7 +14,7 @@ func (c *Client) SendSignal(signal notification.Signal) error {
 		SetDescription(fmt.Sprintf("**타입**: %s\n**가격**: $%.2f\n**이유**: %s",
 			signal.Type, signal.Price, signal.Reason)).
 		SetColor(getColorForSignal(signal.Type)).
-		SetFooter("Assist Trading Bot").
+		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(signal.Timestamp)
 
 	msg := WebhookMessage{
@@ -30,7 +30,7 @@ func (c *Client) SendError(err error) error {
 		SetTitle("에러 발생").
 		SetDescription(fmt.Sprintf("```%v```", err)).
 		SetColor(ColorError).
-		SetFooter("Assist Trading Bot").
+		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(time.Now())
 
 	msg := WebhookMessage{
@@ -38,6 +38,21 @@ func (c *Client) SendError(err error) error {
 	}
 
 	return c.sendToWebhook(c.errorWebhook, msg)
+}
+
+// SendInfo는 일반 정보 알림을 전송합니다
+func (c *Client) SendInfo(message string) error {
+	embed := NewEmbed().
+		SetDescription(message).
+		SetColor(ColorInfo).
+		SetFooter("Assist by Trading Bot 🤖").
+		SetTimestamp(time.Now())
+
+	msg := WebhookMessage{
+		Embeds: []Embed{*embed},
+	}
+
+	return c.sendToWebhook(c.tradeWebhook, msg)
 }
 
 // SendTradeInfo는 거래 실행 정보를 전송합니다
@@ -49,7 +64,7 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 			info.PositionType, info.Quantity, info.EntryPrice, info.StopLoss, info.TakeProfit,
 		)).
 		SetColor(notification.GetColorForPosition(info.PositionType)).
-		SetFooter("Assist Trading Bot").
+		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(time.Now())
 
 	msg := WebhookMessage{

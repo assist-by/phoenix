@@ -20,6 +20,7 @@ type Config struct {
 		SignalWebhook string `envconfig:"DISCORD_SIGNAL_WEBHOOK" required:"true"`
 		TradeWebhook  string `envconfig:"DISCORD_TRADE_WEBHOOK" required:"true"`
 		ErrorWebhook  string `envconfig:"DISCORD_ERROR_WEBHOOK" required:"true"`
+		InfoWebhook   string `envconfig:"DISCORD_INFO_WEBHOOK" required:"true"`
 	}
 
 	// 애플리케이션 설정
