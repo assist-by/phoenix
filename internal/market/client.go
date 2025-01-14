@@ -9,9 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -334,4 +337,53 @@ func getOppositeOrderSide(side OrderSide) OrderSide {
 		return Sell
 	}
 	return Buy
+}
+
+// GetTopVolumeSymbols는 거래량 기준 상위 n개 심볼을 조회합니다
+func (c *Client) GetTopVolumeSymbols(ctx context.Context, n int) ([]string, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/ticker/24hr", nil, false)
+	if err != nil {
+		return nil, fmt.Errorf("거래량 데이터 조회 실패: %w", err)
+	}
+
+	var tickers []SymbolVolume
+	if err := json.Unmarshal(resp, &tickers); err != nil {
+		return nil, fmt.Errorf("거래량 데이터 파싱 실패: %w", err)
+	}
+
+	// USDT 마진 선물만 필터링
+	var filteredTickers []SymbolVolume
+	for _, ticker := range tickers {
+		if strings.HasSuffix(ticker.Symbol, "USDT") {
+			filteredTickers = append(filteredTickers, ticker)
+		}
+	}
+
+	// 거래량 기준 내림차순 정렬
+	sort.Slice(filteredTickers, func(i, j int) bool {
+		return filteredTickers[i].QuoteVolume > filteredTickers[j].QuoteVolume
+	})
+
+	// 상위 n개 심볼 선택
+	resultCount := min(n, len(filteredTickers))
+	symbols := make([]string, resultCount)
+	for i := 0; i < resultCount; i++ {
+		symbols[i] = filteredTickers[i].Symbol
+	}
+
+	// 거래량 로깅 (시각화)
+	if len(filteredTickers) > 0 {
+		maxVolume := filteredTickers[0].QuoteVolume
+		log.Println("\n=== 상위 거래량 심볼 ===")
+		for i := 0; i < resultCount; i++ {
+			ticker := filteredTickers[i]
+			barLength := int((ticker.QuoteVolume / maxVolume) * 50) // 최대 50칸
+			bar := strings.Repeat("=", barLength)
+			log.Printf("%-12s %15.2f USDT ||%s\n",
+				ticker.Symbol, ticker.QuoteVolume, bar)
+		}
+		log.Println("========================")
+	}
+
+	return symbols, nil
 }

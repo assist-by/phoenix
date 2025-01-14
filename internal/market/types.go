@@ -93,3 +93,9 @@ type OrderResponse struct {
 	Type             string       `json:"type"`
 	CreateTime       int64        `json:"time"`
 }
+
+// SymbolVolume은 심볼의 거래량 정보를 표현합니다
+type SymbolVolume struct {
+	Symbol      string  `json:"symbol"`
+	QuoteVolume float64 `json:"quoteVolume,string"`
+}
