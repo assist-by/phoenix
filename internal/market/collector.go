@@ -33,12 +33,12 @@ type Collector struct {
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, discord *discord.Client, opts ...CollectorOption) *Collector {
+func NewCollector(client *Client, discord *discord.Client, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
 	c := &Collector{
 		client:        client,
 		discord:       discord,
-		fetchInterval: 15 * time.Minute,
-		candleLimit:   100,
+		fetchInterval: fetchInterval,
+		candleLimit:   candleLimit,
 		retry: RetryConfig{
 			MaxRetries: 3,
 			BaseDelay:  1 * time.Second,
