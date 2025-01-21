@@ -62,12 +62,12 @@ func MACD(prices []PriceData, opt MACDOption) ([]MACDResult, error) {
 	}
 
 	// MACD 라인 계산 (단기 EMA - 장기 EMA)
-	macdLine := make([]PriceData, len(prices)-opt.LongPeriod+1)
-	for i := 0; i < len(macdLine); i++ {
-		idx := i + opt.LongPeriod - 1
+	macdStartIdx := opt.LongPeriod - 1
+	macdLine := make([]PriceData, len(prices)-macdStartIdx)
+	for i := range macdLine {
 		macdLine[i] = PriceData{
-			Time:  prices[idx].Time,
-			Close: shortEMA[idx].Value - longEMA[idx].Value,
+			Time:  prices[i+macdStartIdx].Time,
+			Close: shortEMA[i+macdStartIdx].Value - longEMA[i+macdStartIdx].Value,
 		}
 	}
 
@@ -78,16 +78,15 @@ func MACD(prices []PriceData, opt MACDOption) ([]MACDResult, error) {
 	}
 
 	// 최종 결과 생성
-	results := make([]MACDResult, len(signalLineData))
-	startIdx := opt.LongPeriod - 1
+	resultStartIdx := opt.SignalPeriod - 1
+	results := make([]MACDResult, len(macdLine)-resultStartIdx)
 	for i := range results {
-		macd := macdLine[i+opt.SignalPeriod-1].Close
-		signal := signalLineData[i].Value
+		macdIdx := i + resultStartIdx
 		results[i] = MACDResult{
-			MACD:      macd,
-			Signal:    signal,
-			Histogram: macd - signal,
-			Timestamp: prices[startIdx+i].Time,
+			MACD:      macdLine[macdIdx].Close,
+			Signal:    signalLineData[i].Value,
+			Histogram: macdLine[macdIdx].Close - signalLineData[i].Value,
+			Timestamp: macdLine[macdIdx].Time,
 		}
 	}
 
