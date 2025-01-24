@@ -16,12 +16,15 @@ const (
 
 // SignalConditions는 시그널 발생 조건들의 상세 정보를 저장합니다
 type SignalConditions struct {
-	EMA         bool    // EMA 조건 충족 여부
-	MACD        bool    // MACD 조건 충족 여부
-	SAR         bool    // SAR 조건 충족 여부
+	EMALong     bool    // 가격이 EMA 위
+	EMAShort    bool    // 가격이 EMA 아래
+	MACDLong    bool    // MACD 상향돌파
+	MACDShort   bool    // MACD 하향돌파
+	SARLong     bool    // SAR이 가격 아래
+	SARShort    bool    // SAR이 가격 위
 	EMAValue    float64 // EMA 값
 	MACDValue   float64 // MACD 값
-	SignalValue float64 // Signal Line 값
+	SignalValue float64 // MACD Signal 값
 	SARValue    float64 // SAR 값
 }
 

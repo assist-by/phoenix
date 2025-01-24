@@ -28,19 +28,18 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 
 	// 시그널 조건 상태 표시
 	longConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 위)
-	%s MACD (시그널 상향돌파)
-	%s SAR (SAR이 가격 아래)`,
-		getCheckMark(s.Type == signal.Long && s.Conditions.EMA),
-		getCheckMark(s.Type == signal.Long && s.Conditions.MACD),
-		getCheckMark(s.Type == signal.Long && s.Conditions.SAR))
+%s MACD (시그널 상향돌파)
+%s SAR (SAR이 가격 아래)`,
+		getCheckMark(s.Conditions.EMALong),
+		getCheckMark(s.Conditions.MACDLong),
+		getCheckMark(s.Conditions.SARLong))
 
 	shortConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 아래)
 		%s MACD (시그널 하향돌파)
 		%s SAR (SAR이 가격 위)`,
-		getCheckMark(s.Type == signal.Short && !s.Conditions.EMA),
-		getCheckMark(s.Type == signal.Short && s.Conditions.MACD),
-		getCheckMark(s.Type == signal.Short && !s.Conditions.SAR))
-
+		getCheckMark(s.Conditions.EMAShort),
+		getCheckMark(s.Conditions.MACDShort),
+		getCheckMark(s.Conditions.SARShort))
 	// 기술적 지표 값
 	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
 		s.Conditions.EMAValue,

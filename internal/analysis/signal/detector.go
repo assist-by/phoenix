@@ -95,13 +95,17 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		signal.TakeProfit = currentPrice - (signal.StopLoss - currentPrice) // 1:1 비율
 	}
 
-	// 시그널 조건 저장
+	emaCondition := currentPrice > ema[len(ema)-1].Value
+	sarCondition := sar[len(sar)-1].SAR < prices[len(prices)-1].Low
+
+	// 시그널 조건
 	signal.Conditions = SignalConditions{
-		EMA: currentPrice > ema[len(ema)-1].Value,
-		MACD: (signal.Type == Long && macdCross == 1) ||
-			(signal.Type == Short && macdCross == -1),
-		SAR: (signal.Type == Long && sar[len(sar)-1].SAR < prices[len(prices)-1].Low) ||
-			(signal.Type == Short && sar[len(sar)-1].SAR > prices[len(prices)-1].High),
+		EMALong:     emaCondition,
+		EMAShort:    !emaCondition,
+		MACDLong:    macdCross == 1,
+		MACDShort:   macdCross == -1,
+		SARLong:     sarCondition,
+		SARShort:    !sarCondition,
 		EMAValue:    ema[len(ema)-1].Value,
 		MACDValue:   currentMACD,
 		SignalValue: currentSignal,
