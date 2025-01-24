@@ -1,6 +1,7 @@
 package signal
 
 import (
+	"sync"
 	"time"
 )
 
@@ -13,40 +14,40 @@ const (
 	Short
 )
 
+// SignalConditions는 시그널 발생 조건들의 상세 정보를 저장합니다
+type SignalConditions struct {
+	EMA         bool    // EMA 조건 충족 여부
+	MACD        bool    // MACD 조건 충족 여부
+	SAR         bool    // SAR 조건 충족 여부
+	EMAValue    float64 // EMA 값
+	MACDValue   float64 // MACD 값
+	SignalValue float64 // Signal Line 값
+	SARValue    float64 // SAR 값
+}
+
 // Signal은 생성된 시그널 정보를 담습니다
 type Signal struct {
-	Type      SignalType
-	Symbol    string
-	Price     float64
-	Timestamp time.Time
-
-	// 진입 조건 상세
-	Conditions struct {
-		EMA  bool // EMA 조건 충족 여부
-		MACD bool // MACD 조건 충족 여부
-		SAR  bool // SAR 조건 충족 여부
-
-		// 지표 상세값
-		EMAValue    float64
-		MACDValue   float64
-		SignalValue float64
-		SARValue    float64
-	}
-
-	// 리스크 관리
+	Type       SignalType
+	Symbol     string
+	Price      float64
+	Timestamp  time.Time
+	Conditions SignalConditions
 	StopLoss   float64
 	TakeProfit float64
 }
 
+// SymbolState는 각 심볼별 상태를 관리합니다
+type SymbolState struct {
+	PrevMACD   float64
+	PrevSignal float64
+	LastSignal *Signal
+}
+
 // Detector는 시그널 감지기를 정의합니다
 type Detector struct {
-	// 설정값
+	states        map[string]*SymbolState
 	emaLength     int     // EMA 기간
 	stopLossPct   float64 // 손절 비율
 	takeProfitPct float64 // 익절 비율
-
-	// 이전 상태 저장
-	prevMACD   float64
-	prevSignal float64
-	lastSignal *Signal
+	mu            sync.RWMutex
 }

@@ -2,62 +2,89 @@ package discord
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/assist-by/phoenix/internal/analysis/signal"
 )
 
 // SendSignal은 시그널 알림을 Discord로 전송합니다
 func (c *Client) SendSignal(s *signal.Signal) error {
-	// 시그널 타입에 따른 이모지와 색상 설정
-	var emoji string
+	var title, emoji string
 	var color int
+
 	switch s.Type {
 	case signal.Long:
 		emoji = "🚀"
+		title = "LONG"
 		color = ColorSuccess
 	case signal.Short:
 		emoji = "🔻"
+		title = "SHORT"
 		color = ColorError
 	default:
-		emoji = "⏺️"
+		emoji = "⚠️"
+		title = "NO SIGNAL"
 		color = ColorInfo
 	}
 
-	// 시그널 설명 생성
-	description := fmt.Sprintf(`**시간**: %s
-**현재가**: $%.4f
-**방향**: %s
-**손절가**: $%.4f (%.2f%%)
-**목표가**: $%.4f (%.2f%%)`,
-		s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-		s.Price,
-		fmt.Sprintf("%s %s", emoji, s.Type),
-		s.StopLoss,
-		(s.StopLoss-s.Price)/s.Price*100,
-		s.TakeProfit,
-		(s.TakeProfit-s.Price)/s.Price*100,
-	)
+	// 시그널 조건 상태 표시
+	longConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 위)
+ %s MACD (시그널 상향돌파)
+ %s SAR (SAR이 가격 아래)`,
+		getCheckMark(s.Conditions.EMA),
+		getCheckMark(s.Conditions.MACD),
+		getCheckMark(s.Conditions.SAR))
 
-	// 기술적 지표 필드 추가
-	technicalAnalysis := fmt.Sprintf("```\nEMA200: %.4f\nMACD: %.4f\nSignal: %.4f\nSAR: %.4f\n```",
+	shortConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 아래)
+ %s MACD (시그널 하향돌파)
+ %s SAR (SAR이 가격 위)`,
+		getCheckMark(!s.Conditions.EMA),
+		getCheckMark(s.Conditions.MACD),
+		getCheckMark(!s.Conditions.SAR))
+
+	// 기술적 지표 값
+	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
 		s.Conditions.EMAValue,
 		s.Conditions.MACDValue,
 		s.Conditions.SignalValue,
-		s.Conditions.SARValue,
-	)
+		s.Conditions.MACDValue-s.Conditions.SignalValue,
+		s.Conditions.SARValue)
 
-	// 임베드 메시지 생성
 	embed := NewEmbed().
-		SetTitle(fmt.Sprintf("%s %s/USDT", emoji, s.Symbol)).
-		SetDescription(description).
-		SetColor(color).
-		AddField("기술적 지표", technicalAnalysis, false).
-		SetFooter("🤖 Phoenix Trading Bot").
-		SetTimestamp(time.Now())
+		SetTitle(fmt.Sprintf("%s %s %s/USDT", emoji, title, s.Symbol)).
+		SetColor(color)
 
-	// 시그널 웹훅으로 전송
+	if s.Type != signal.NoSignal {
+		embed.SetDescription(fmt.Sprintf(`**시간**: %s
+ **현재가**: $%.2f
+ **손절가**: $%.2f (%.2f%%)
+ **목표가**: $%.2f (%.2f%%)`,
+			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
+			s.Price,
+			s.StopLoss,
+			(s.StopLoss-s.Price)/s.Price*100,
+			s.TakeProfit,
+			(s.TakeProfit-s.Price)/s.Price*100,
+		))
+	} else {
+		embed.SetDescription(fmt.Sprintf(`**시간**: %s
+ **현재가**: $%.2f`,
+			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
+			s.Price,
+		))
+	}
+
+	embed.AddField("LONG 조건", longConditions, true)
+	embed.AddField("SHORT 조건", shortConditions, true)
+	embed.AddField("기술적 지표", technicalValues, false)
+
 	return c.sendToWebhook(c.signalWebhook, WebhookMessage{
 		Embeds: []Embed{*embed},
 	})
+}
+
+func getCheckMark(condition bool) string {
+	if condition {
+		return "✅"
+	}
+	return "❌"
 }

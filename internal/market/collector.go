@@ -142,8 +142,11 @@ func (c *Collector) Collect(ctx context.Context) error {
 				return nil
 			}
 
+			// 시그널 정보 로깅
+			log.Printf("%s 시그널 감지 결과: %+v", symbol, s)
+
 			// 시그널이 있으면 Discord로 전송
-			if s != nil && s.Type != signal.NoSignal {
+			if s != nil {
 				if err := c.discord.SendSignal(s); err != nil {
 					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
 				}

@@ -9,6 +9,7 @@ import (
 // NewDetector는 새로운 시그널 감지기를 생성합니다
 func NewDetector(config DetectorConfig) *Detector {
 	return &Detector{
+		states:        make(map[string]*SymbolState),
 		emaLength:     config.EMALength,
 		stopLossPct:   config.StopLossPct,
 		takeProfitPct: config.TakeProfitPct,
@@ -27,6 +28,9 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 	if len(prices) < d.emaLength {
 		return nil, fmt.Errorf("insufficient data: need at least %d prices", d.emaLength)
 	}
+
+	// 심볼별 상태 가져오기
+	state := d.getSymbolState(symbol)
 
 	// 지표 계산
 	ema, err := indicator.EMA(prices, indicator.EMAOption{Period: d.emaLength})
@@ -48,22 +52,22 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		return nil, fmt.Errorf("calculating SAR: %w", err)
 	}
 
-	// 현재 가격
 	currentPrice := prices[len(prices)-1].Close
+	currentMACD := macd[len(macd)-1].MACD
+	currentSignal := macd[len(macd)-1].Signal
 
-	// MACD 크로스 확인
+	// MACD 크로스 확인 - 이제 심볼별 상태 사용
 	macdCross := d.checkMACDCross(
-		macd[len(macd)-1].MACD,
-		macd[len(macd)-1].Signal,
-		d.prevMACD,
-		d.prevSignal,
+		currentMACD,
+		currentSignal,
+		state.PrevMACD,
+		state.PrevSignal,
 	)
 
 	// 상태 업데이트
-	d.prevMACD = macd[len(macd)-1].MACD
-	d.prevSignal = macd[len(macd)-1].Signal
+	state.PrevMACD = currentMACD
+	state.PrevSignal = currentSignal
 
-	// 시그널 생성
 	signal := &Signal{
 		Type:      NoSignal,
 		Symbol:    symbol,
@@ -71,41 +75,38 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		Timestamp: prices[len(prices)-1].Time,
 	}
 
-	// Long 시그널 조건 확인
+	// Long 시그널 조건 수정
 	if currentPrice > ema[len(ema)-1].Value && // EMA 200 위
 		macdCross == 1 && // MACD 상향 돌파
-		!sar[len(sar)-1].IsLong { // SAR이 가격 아래
+		sar[len(sar)-1].SAR < prices[len(prices)-1].Low { // SAR이 현재 봉의 저가보다 낮음
 
 		signal.Type = Long
-		signal.StopLoss = currentPrice * (1 - d.stopLossPct)
-		signal.TakeProfit = currentPrice * (1 + d.takeProfitPct)
+		signal.StopLoss = sar[len(sar)-1].SAR                               // SAR 기반 손절가
+		signal.TakeProfit = currentPrice + (currentPrice - signal.StopLoss) // 1:1 비율
 	}
 
-	// Short 시그널 조건 확인
+	// Short 시그널 조건 수정
 	if currentPrice < ema[len(ema)-1].Value && // EMA 200 아래
 		macdCross == -1 && // MACD 하향 돌파
-		sar[len(sar)-1].IsLong { // SAR이 가격 위
+		sar[len(sar)-1].SAR > prices[len(prices)-1].High { // SAR이 현재 봉의 고가보다 높음
 
 		signal.Type = Short
-		signal.StopLoss = currentPrice * (1 + d.stopLossPct)
-		signal.TakeProfit = currentPrice * (1 - d.takeProfitPct)
+		signal.StopLoss = sar[len(sar)-1].SAR                               // SAR 기반 손절가
+		signal.TakeProfit = currentPrice - (signal.StopLoss - currentPrice) // 1:1 비율
 	}
 
 	// 시그널 조건 저장
-	signal.Conditions.EMA = currentPrice > ema[len(ema)-1].Value
-	signal.Conditions.MACD = macdCross != 0
-	signal.Conditions.SAR = !sar[len(sar)-1].IsLong
-	signal.Conditions.EMAValue = ema[len(ema)-1].Value
-	signal.Conditions.MACDValue = macd[len(macd)-1].MACD
-	signal.Conditions.SignalValue = macd[len(macd)-1].Signal
-	signal.Conditions.SARValue = sar[len(sar)-1].SAR
+	signal.Conditions = SignalConditions{
+		EMA:         currentPrice > ema[len(ema)-1].Value,
+		MACD:        macdCross != 0,
+		SAR:         !sar[len(sar)-1].IsLong,
+		EMAValue:    ema[len(ema)-1].Value,
+		MACDValue:   currentMACD,
+		SignalValue: currentSignal,
+		SARValue:    sar[len(sar)-1].SAR,
+	}
 
-	// // 중복 시그널 방지
-	// if d.isDuplicateSignal(signal) {
-	// 	return nil, nil
-	// }
-
-	d.lastSignal = signal
+	state.LastSignal = signal
 	return signal, nil
 }
 
