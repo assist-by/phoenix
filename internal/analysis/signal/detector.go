@@ -97,9 +97,11 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 
 	// 시그널 조건 저장
 	signal.Conditions = SignalConditions{
-		EMA:         currentPrice > ema[len(ema)-1].Value,
-		MACD:        macdCross != 0,
-		SAR:         !sar[len(sar)-1].IsLong,
+		EMA: currentPrice > ema[len(ema)-1].Value,
+		MACD: (signal.Type == Long && macdCross == 1) ||
+			(signal.Type == Short && macdCross == -1),
+		SAR: (signal.Type == Long && sar[len(sar)-1].SAR < prices[len(prices)-1].Low) ||
+			(signal.Type == Short && sar[len(sar)-1].SAR > prices[len(prices)-1].High),
 		EMAValue:    ema[len(ema)-1].Value,
 		MACDValue:   currentMACD,
 		SignalValue: currentSignal,
