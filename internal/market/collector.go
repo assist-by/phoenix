@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/assist-by/phoenix/internal/analysis/indicator"
+	"github.com/assist-by/phoenix/internal/analysis/signal"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 )
 
@@ -27,6 +29,7 @@ type Collector struct {
 	fetchInterval time.Duration
 	candleLimit   int
 	retry         RetryConfig
+	detector      *signal.Detector
 	mu            sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
@@ -37,13 +40,11 @@ func NewCollector(client *Client, discord *discord.Client, fetchInterval time.Du
 		discord:       discord,
 		fetchInterval: fetchInterval,
 		candleLimit:   candleLimit,
-		mu:            sync.Mutex{},
-		retry: RetryConfig{
-			MaxRetries: 3,
-			BaseDelay:  1 * time.Second,
-			MaxDelay:   30 * time.Second,
-			Factor:     2.0,
-		},
+		detector: signal.NewDetector(signal.DetectorConfig{
+			EMALength:     200,
+			StopLossPct:   0.02,
+			TakeProfitPct: 0.04,
+		}),
 	}
 
 	for _, opt := range opts {
@@ -120,7 +121,34 @@ func (c *Collector) Collect(ctx context.Context) error {
 			}
 
 			log.Printf("%s 심볼의 캔들 데이터 %d개 수집 완료", symbol, len(candles))
-			// TODO: 수집된 데이터 처리 (시그널 생성 또는 저장)
+
+			// 캔들 데이터를 indicator.PriceData로 변환
+			prices := make([]indicator.PriceData, len(candles))
+			for i, candle := range candles {
+				prices[i] = indicator.PriceData{
+					Time:   time.Unix(candle.OpenTime/1000, 0),
+					Open:   candle.Open,
+					High:   candle.High,
+					Low:    candle.Low,
+					Close:  candle.Close,
+					Volume: candle.Volume,
+				}
+			}
+
+			// 시그널 감지
+			s, err := c.detector.Detect(symbol, prices)
+			if err != nil {
+				log.Printf("시그널 감지 실패 (%s): %v", symbol, err)
+				return nil
+			}
+
+			// 시그널이 있으면 Discord로 전송
+			if s != nil && s.Type != signal.NoSignal {
+				if err := c.discord.SendSignal(s); err != nil {
+					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
+				}
+			}
+
 			return nil
 		})
 		if err != nil {

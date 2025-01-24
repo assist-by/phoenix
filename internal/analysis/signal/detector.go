@@ -100,10 +100,10 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 	signal.Conditions.SignalValue = macd[len(macd)-1].Signal
 	signal.Conditions.SARValue = sar[len(sar)-1].SAR
 
-	// 중복 시그널 방지
-	if d.isDuplicateSignal(signal) {
-		return nil, nil
-	}
+	// // 중복 시그널 방지
+	// if d.isDuplicateSignal(signal) {
+	// 	return nil, nil
+	// }
 
 	d.lastSignal = signal
 	return signal, nil
@@ -122,15 +122,15 @@ func (d *Detector) checkMACDCross(currentMACD, currentSignal, prevMACD, prevSign
 }
 
 // isDuplicateSignal은 중복 시그널인지 확인합니다
-func (d *Detector) isDuplicateSignal(signal *Signal) bool {
-	if d.lastSignal == nil {
-		return false
-	}
+// func (d *Detector) isDuplicateSignal(signal *Signal) bool {
+// 	if d.lastSignal == nil {
+// 		return false
+// 	}
 
-	// 동일 방향의 시그널이 이미 존재하는 경우
-	if d.lastSignal.Type == signal.Type {
-		return true
-	}
+// 	// 동일 방향의 시그널이 이미 존재하는 경우
+// 	if d.lastSignal.Type == signal.Type {
+// 		return true
+// 	}
 
-	return false
-}
+// 	return false
+// }

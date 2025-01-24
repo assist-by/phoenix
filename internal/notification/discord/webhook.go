@@ -8,21 +8,21 @@ import (
 )
 
 // SendSignal은 시그널 알림을 전송합니다
-func (c *Client) SendSignal(signal notification.Signal) error {
-	embed := NewEmbed().
-		SetTitle(fmt.Sprintf("트레이딩 시그널: %s", signal.Symbol)).
-		SetDescription(fmt.Sprintf("**타입**: %s\n**가격**: $%.2f\n**이유**: %s",
-			signal.Type, signal.Price, signal.Reason)).
-		SetColor(getColorForSignal(signal.Type)).
-		SetFooter("Assist by Trading Bot 🤖").
-		SetTimestamp(signal.Timestamp)
+// func (c *Client) SendSignal(signal notification.Signal) error {
+// 	embed := NewEmbed().
+// 		SetTitle(fmt.Sprintf("트레이딩 시그널: %s", signal.Symbol)).
+// 		SetDescription(fmt.Sprintf("**타입**: %s\n**가격**: $%.2f\n**이유**: %s",
+// 			signal.Type, signal.Price, signal.Reason)).
+// 		SetColor(getColorForSignal(signal.Type)).
+// 		SetFooter("Assist by Trading Bot 🤖").
+// 		SetTimestamp(signal.Timestamp)
 
-	msg := WebhookMessage{
-		Embeds: []Embed{*embed},
-	}
+// 	msg := WebhookMessage{
+// 		Embeds: []Embed{*embed},
+// 	}
 
-	return c.sendToWebhook(c.signalWebhook, msg)
-}
+// 	return c.sendToWebhook(c.signalWebhook, msg)
+// }
 
 // SendError는 에러 알림을 전송합니다
 func (c *Client) SendError(err error) error {
