@@ -52,5 +52,6 @@ type Detector struct {
 	emaLength     int     // EMA 기간
 	stopLossPct   float64 // 손절 비율
 	takeProfitPct float64 // 익절 비율
+	minHistogram  float64 // MACD 히스토그램 최소값
 	mu            sync.RWMutex
 }

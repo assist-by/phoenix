@@ -13,14 +13,16 @@ func NewDetector(config DetectorConfig) *Detector {
 		emaLength:     config.EMALength,
 		stopLossPct:   config.StopLossPct,
 		takeProfitPct: config.TakeProfitPct,
+		minHistogram:  config.MinHistogram,
 	}
 }
 
 // DetectorConfig는 시그널 감지기 설정을 정의합니다
 type DetectorConfig struct {
-	EMALength     int     // EMA 기간 (기본값: 200)
-	StopLossPct   float64 // 손절 비율 (기본값: 0.02 -> 2%)
-	TakeProfitPct float64 // 익절 비율 (기본값: 0.04 -> 4%)
+	EMALength     int // EMA 기간 (기본값: 200)
+	StopLossPct   float64
+	TakeProfitPct float64
+	MinHistogram  float64 // 최소 MACD 히스토그램 값 (기본값: 0.00005)
 }
 
 // Detect는 주어진 데이터로부터 시그널을 감지합니다
@@ -75,9 +77,13 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		Timestamp: prices[len(prices)-1].Time,
 	}
 
-	// Long 시그널 조건 수정
+	// MACD 히스토그램 계산
+	histogram := currentMACD - currentSignal
+
+	// Long 시그널
 	if currentPrice > ema[len(ema)-1].Value && // EMA 200 위
 		macdCross == 1 && // MACD 상향 돌파
+		histogram >= d.minHistogram && // MACD 히스토그램이 최소값 이상
 		sar[len(sar)-1].SAR < prices[len(prices)-1].Low { // SAR이 현재 봉의 저가보다 낮음
 
 		signal.Type = Long
@@ -85,9 +91,10 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		signal.TakeProfit = currentPrice + (currentPrice - signal.StopLoss) // 1:1 비율
 	}
 
-	// Short 시그널 조건 수정
+	// Short 시그널
 	if currentPrice < ema[len(ema)-1].Value && // EMA 200 아래
 		macdCross == -1 && // MACD 하향 돌파
+		-histogram >= d.minHistogram && // 음수 히스토그램에 대한 조건
 		sar[len(sar)-1].SAR > prices[len(prices)-1].High { // SAR이 현재 봉의 고가보다 높음
 
 		signal.Type = Short
