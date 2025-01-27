@@ -16,8 +16,8 @@ flowchart TD
     end
 
     subgraph Trading[거래 실행]
-        OrderManager[주문 관리]
-        PositionManager[포지션 관리]
+        Executor[거래 실행기]
+        Settings[거래 설정]
     end
 
     subgraph Notification[알림]
@@ -26,14 +26,18 @@ flowchart TD
     end
 
     Config --> Scheduler
+    Config --> Settings
+    Settings --> Executor
+    
     Scheduler --> DataCollector
     DataCollector --> Binance
     DataCollector --> Calculator
+    
     Calculator --> SignalDetector
-    SignalDetector --> OrderManager
-    OrderManager --> Binance
-    OrderManager --> Discord
-    PositionManager --> OrderManager
+    SignalDetector --> Executor
+    Executor --> Binance
+    
     SignalDetector --> MessageFormatter
+    Executor --> MessageFormatter
     MessageFormatter --> Discord
 ```
