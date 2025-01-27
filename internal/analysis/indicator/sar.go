@@ -47,95 +47,51 @@ type SARResult struct {
 
 // SAR은 Parabolic SAR 지표를 계산합니다
 func SAR(prices []PriceData, opt SAROption) ([]SARResult, error) {
-	if err := ValidateSAROption(opt); err != nil {
-		return nil, err
-	}
-
-	if len(prices) < 2 {
-		return nil, &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("최소 2개의 가격 데이터가 필요합니다"),
-		}
-	}
-
 	results := make([]SARResult, len(prices))
-
-	// 초기값 설정
-	isLong := prices[1].Close > prices[0].Close
-	extremePoint := 0.0
+	// 초기값 설정 단순화
 	af := opt.AccelerationInitial
-	sar := 0.0
+	sar := prices[0].Low
+	ep := prices[0].High
+	isLong := true
 
-	if isLong {
-		sar = prices[0].Low
-		extremePoint = prices[1].High
-	} else {
-		sar = prices[0].High
-		extremePoint = prices[1].Low
-	}
-
-	// 첫 번째 결과 저장
-	results[0] = SARResult{
-		SAR:       sar,
-		IsLong:    isLong,
-		Timestamp: prices[0].Time,
-	}
+	results[0] = SARResult{SAR: sar, IsLong: isLong, Timestamp: prices[0].Time}
 
 	// SAR 계산
 	for i := 1; i < len(prices); i++ {
-		prevSAR := sar
-
-		// SAR 값 계산
-		sar = prevSAR + af*(extremePoint-prevSAR)
-
-		// 현재 추세가 상승일 때
 		if isLong {
-			// SAR는 이전 두 봉의 저점보다 높을 수 없음
-			if i > 1 {
-				minLow := math.Min(prices[i-1].Low, prices[i].Low)
-				if sar > minLow {
-					sar = minLow
-				}
-			}
+			sar = sar + af*(ep-sar)
 
-			// 새로운 고점 발견 시 가속도 증가
-			if prices[i].High > extremePoint {
-				extremePoint = prices[i].High
+			// 새로운 고점 발견
+			if prices[i].High > ep {
+				ep = prices[i].High
 				af = math.Min(af+opt.AccelerationInitial, opt.AccelerationMax)
 			}
 
-			// 추세 전환 확인
-			if prices[i].Low < sar {
+			// 추세 전환 체크
+			if sar > prices[i].Low {
 				isLong = false
-				sar = extremePoint
-				extremePoint = prices[i].Low
+				sar = ep
+				ep = prices[i].Low
 				af = opt.AccelerationInitial
 			}
 		} else {
-			// SAR는 이전 두 봉의 고점보다 낮을 수 없음
-			if i > 1 {
-				maxHigh := math.Max(prices[i-1].High, prices[i].High)
-				if sar < maxHigh {
-					sar = maxHigh
-				}
-			}
+			sar = sar - af*(sar-ep)
 
-			// 새로운 저점 발견 시 가속도 증가
-			if prices[i].Low < extremePoint {
-				extremePoint = prices[i].Low
+			// 새로운 저점 발견
+			if prices[i].Low < ep {
+				ep = prices[i].Low
 				af = math.Min(af+opt.AccelerationInitial, opt.AccelerationMax)
 			}
 
-			// 추세 전환 확인
-			if prices[i].High > sar {
+			// 추세 전환 체크
+			if sar < prices[i].High {
 				isLong = true
-				sar = extremePoint
-				extremePoint = prices[i].High
+				sar = ep
+				ep = prices[i].High
 				af = opt.AccelerationInitial
 			}
 		}
 
-		// 결과 저장
 		results[i] = SARResult{
 			SAR:       sar,
 			IsLong:    isLong,
