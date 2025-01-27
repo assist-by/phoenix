@@ -28,6 +28,28 @@ type Config struct {
 		FetchInterval time.Duration `envconfig:"FETCH_INTERVAL" default:"15m"`
 		CandleLimit   int           `envconfig:"CANDLE_LIMIT" default:"100"`
 	}
+
+	// 거래 설정
+	Trading struct {
+		Leverage int `envconfig:"LEVERAGE" default:"5" validate:"min=1,max=100"`
+	}
+}
+
+// ValidateConfig는 설정이 유효한지 확인합니다.
+func ValidateConfig(cfg *Config) error {
+	if cfg.Trading.Leverage < 1 || cfg.Trading.Leverage > 100 {
+		return fmt.Errorf("레버리지는 1 이상 100 이하이어야 합니다")
+	}
+
+	if cfg.App.FetchInterval < 1*time.Minute {
+		return fmt.Errorf("FETCH_INTERVAL은 1분 이상이어야 합니다")
+	}
+
+	if cfg.App.CandleLimit < 300 {
+		return fmt.Errorf("CANDLE_LIMIT은 300 이상이어야 합니다")
+	}
+
+	return nil
 }
 
 // LoadConfig는 환경변수에서 설정을 로드합니다.
@@ -41,6 +63,11 @@ func LoadConfig() (*Config, error) {
 	// 환경변수를 구조체로 파싱
 	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, fmt.Errorf("환경변수 처리 실패: %w", err)
+	}
+
+	// 설정값 검증
+	if err := ValidateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("설정값 검증 실패: %w", err)
 	}
 
 	return &cfg, nil
