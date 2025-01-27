@@ -43,39 +43,35 @@ type Balance struct {
 // OrderSide는 주문 방향을 정의합니다
 type OrderSide string
 
-const (
-	Buy  OrderSide = "BUY"
-	Sell OrderSide = "SELL"
-)
-
 // PositionSide는 포지션 방향을 정의합니다
 type PositionSide string
-
-const (
-	Long  PositionSide = "LONG"
-	Short PositionSide = "SHORT"
-)
 
 // OrderType은 주문 유형을 정의합니다
 type OrderType string
 
 const (
-	Market           OrderType = "MARKET"
-	Limit            OrderType = "LIMIT"
-	StopMarket       OrderType = "STOP_MARKET"
-	TakeProfitMarket OrderType = "TAKE_PROFIT_MARKET"
+	Buy  OrderSide = "BUY"
+	Sell OrderSide = "SELL"
+
+	Long  PositionSide = "LONG"
+	Short PositionSide = "SHORT"
+
+	Market  OrderType = "MARKET"
+	Limit   OrderType = "LIMIT"
+	StopOCO OrderType = "STOP_OCO"
 )
 
 // OrderRequest는 주문 요청 정보를 표현합니다
+
 type OrderRequest struct {
 	Symbol       string
 	Side         OrderSide
 	PositionSide PositionSide
 	Type         OrderType
 	Quantity     float64
-	Price        float64
-	StopPrice    float64
-	TimeInForce  string
+	Price        float64 // 진입가격
+	StopPrice    float64 // 손절가격
+	TakeProfit   float64 // 익절가격
 }
 
 // OrderResponse는 주문 응답을 표현합니다

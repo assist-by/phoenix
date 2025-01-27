@@ -246,26 +246,17 @@ func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResp
 	params.Add("side", string(order.Side))
 	params.Add("type", string(order.Type))
 	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+	params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+	params.Add("stopLimitPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+	params.Add("price", strconv.FormatFloat(order.TakeProfit, 'f', -1, 64))
 
 	if order.PositionSide != "" {
 		params.Add("positionSide", string(order.PositionSide))
 	}
 
-	if order.Price > 0 {
-		params.Add("price", strconv.FormatFloat(order.Price, 'f', -1, 64))
-	}
-
-	if order.StopPrice > 0 {
-		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-	}
-
-	if order.TimeInForce != "" {
-		params.Add("timeInForce", order.TimeInForce)
-	}
-
-	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order", params, true)
+	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order/oco", params, true)
 	if err != nil {
-		return nil, fmt.Errorf("주문 실행 실패: %w", err)
+		return nil, fmt.Errorf("OCO 주문 실행 실패: %w", err)
 	}
 
 	var result OrderResponse
@@ -276,38 +267,38 @@ func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResp
 	return &result, nil
 }
 
-// PlaceTPSLOrder는 손절/익절 주문을 생성합니다
-func (c *Client) PlaceTPSLOrder(ctx context.Context, mainOrder *OrderResponse, stopLoss, takeProfit float64) error {
-	if stopLoss > 0 {
-		slOrder := OrderRequest{
-			Symbol:       mainOrder.Symbol,
-			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
-			Type:         StopMarket,
-			Quantity:     mainOrder.ExecutedQuantity,
-			StopPrice:    stopLoss,
-			PositionSide: mainOrder.PositionSide,
-		}
-		if _, err := c.PlaceOrder(ctx, slOrder); err != nil {
-			return fmt.Errorf("손절 주문 실패: %w", err)
-		}
-	}
+// // PlaceTPSLOrder는 손절/익절 주문을 생성합니다
+// func (c *Client) PlaceTPSLOrder(ctx context.Context, mainOrder *OrderResponse, stopLoss, takeProfit float64) error {
+// 	if stopLoss > 0 {
+// 		slOrder := OrderRequest{
+// 			Symbol:       mainOrder.Symbol,
+// 			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
+// 			Type:         StopMarket,
+// 			Quantity:     mainOrder.ExecutedQuantity,
+// 			StopPrice:    stopLoss,
+// 			PositionSide: mainOrder.PositionSide,
+// 		}
+// 		if _, err := c.PlaceOrder(ctx, slOrder); err != nil {
+// 			return fmt.Errorf("손절 주문 실패: %w", err)
+// 		}
+// 	}
 
-	if takeProfit > 0 {
-		tpOrder := OrderRequest{
-			Symbol:       mainOrder.Symbol,
-			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
-			Type:         TakeProfitMarket,
-			Quantity:     mainOrder.ExecutedQuantity,
-			StopPrice:    takeProfit,
-			PositionSide: mainOrder.PositionSide,
-		}
-		if _, err := c.PlaceOrder(ctx, tpOrder); err != nil {
-			return fmt.Errorf("익절 주문 실패: %w", err)
-		}
-	}
+// 	if takeProfit > 0 {
+// 		tpOrder := OrderRequest{
+// 			Symbol:       mainOrder.Symbol,
+// 			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
+// 			Type:         TakeProfitMarket,
+// 			Quantity:     mainOrder.ExecutedQuantity,
+// 			StopPrice:    takeProfit,
+// 			PositionSide: mainOrder.PositionSide,
+// 		}
+// 		if _, err := c.PlaceOrder(ctx, tpOrder); err != nil {
+// 			return fmt.Errorf("익절 주문 실패: %w", err)
+// 		}
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // SetLeverage는 레버리지를 설정합니다
 func (c *Client) SetLeverage(ctx context.Context, symbol string, leverage int) error {
