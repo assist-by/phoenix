@@ -1,5 +1,25 @@
 # phoenix
 
+## Windows 용 build 하는 법
+
+```bash
+# 명령 프롬프트(cmd)에서:
+GOOS=windows GOARCH=amd64 go build -o phoenix ./cmd/trader
+
+# PowerShell에서:
+$env:GOOS="windows"; $env:GOARCH="amd64"; go build -o phoenix ./cmd/trader
+```
+
+## Linux 용 build 하는 법
+
+```bash
+# 명령 프롬프트(cmd)에서:
+GOOS=linux GOARCH=amd64 go build -o phoenix ./cmd/trader
+
+# PowerShell에서:
+$env:GOOS="linux"; $env:GOARCH="amd64"; go build -o phoenix ./cmd/trader
+```
+
 ## 매매 알고리즘
 
 ```mermaid
