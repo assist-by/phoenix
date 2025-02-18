@@ -95,3 +95,10 @@ type SymbolVolume struct {
 	Symbol      string  `json:"symbol"`
 	QuoteVolume float64 `json:"quoteVolume,string"`
 }
+
+type PositionInfo struct {
+	Symbol       string  `json:"symbol"`
+	PositionSide string  `json:"positionSide"`
+	Quantity     float64 `json:"positionAmt,string"`
+	EntryPrice   float64 `json:"entryPrice,string"`
+}

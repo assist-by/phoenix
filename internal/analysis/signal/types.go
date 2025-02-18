@@ -14,6 +14,19 @@ const (
 	Short
 )
 
+func (s SignalType) String() string {
+	switch s {
+	case NoSignal:
+		return "NoSignal"
+	case Long:
+		return "Long"
+	case Short:
+		return "Short"
+	default:
+		return "Unknown"
+	}
+}
+
 // SignalConditions는 시그널 발생 조건들의 상세 정보를 저장합니다
 type SignalConditions struct {
 	EMALong     bool    // 가격이 EMA 위

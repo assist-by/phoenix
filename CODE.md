@@ -2269,6 +2269,19 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 		SetColor(color)
 
 	if s.Type != signal.NoSignal {
+		// 손익률 계산 및 표시
+		var slPct, tpPct float64
+		switch s.Type {
+		case signal.Long:
+			// Long: 실제 수치 그대로 표시
+			slPct = (s.StopLoss - s.Price) / s.Price * 100
+			tpPct = (s.TakeProfit - s.Price) / s.Price * 100
+		case signal.Short:
+			// Short: 부호 반대로 표시
+			slPct = (s.Price - s.StopLoss) / s.Price * 100
+			tpPct = (s.Price - s.TakeProfit) / s.Price * 100
+		}
+
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
  **현재가**: $%.2f
  **손절가**: $%.2f (%.2f%%)
@@ -2276,9 +2289,9 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
 			s.Price,
 			s.StopLoss,
-			(s.StopLoss-s.Price)/s.Price*100,
+			slPct,
 			s.TakeProfit,
-			(s.TakeProfit-s.Price)/s.Price*100,
+			tpPct,
 		))
 	} else {
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s

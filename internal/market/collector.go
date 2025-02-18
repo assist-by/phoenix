@@ -1,5 +1,3 @@
-// internal/market/collector.go
-
 package market
 
 import (
@@ -11,6 +9,7 @@ import (
 
 	"github.com/assist-by/phoenix/internal/analysis/indicator"
 	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 )
 
@@ -145,10 +144,42 @@ func (c *Collector) Collect(ctx context.Context) error {
 			// 시그널 정보 로깅
 			log.Printf("%s 시그널 감지 결과: %+v", symbol, s)
 
-			// 시그널이 있으면 Discord로 전송
 			if s != nil {
 				if err := c.discord.SendSignal(s); err != nil {
 					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
+				}
+
+				if s.Type != signal.NoSignal {
+					// 진입 가능 여부 확인
+					available, reason, quantity, err := c.checkEntryAvailable(ctx, s)
+					if err != nil {
+						log.Printf("진입 가능 여부 확인 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+
+					}
+
+					if !available {
+						log.Printf("진입 불가: %s", reason)
+
+					}
+
+					tradeInfo := notification.TradeInfo{
+						Symbol:       s.Symbol,
+						PositionType: s.Type.String(),
+						Quantity:     quantity,
+						EntryPrice:   s.Price,
+						StopLoss:     s.StopLoss,
+						TakeProfit:   s.TakeProfit,
+					}
+
+					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+						log.Printf("거래 정보 알림 전송 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+					}
 				}
 			}
 
@@ -161,6 +192,66 @@ func (c *Collector) Collect(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// calculateQuantity는 현재 잔고로 매수 가능한 수량을 계산합니다
+func (c *Collector) calculatequantity(balance float64, entryPrice float64, percentageToUse float64) float64 {
+	// 사용 가능한 잔고 계산
+	usableBalance := balance * (percentageToUse / 100)
+
+	// 수수료( 우선은 0.1%로 설정해놓음)
+	fee := 0.001
+
+	// 매수 가능한 수량 = 사용 가능한 잔고 / (진입가 * (1+수수료료))
+	quantity := usableBalance / (entryPrice * (1 + fee))
+
+	return quantity
+}
+
+func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, string, float64, error) {
+	// 1. 현재 포지션 조회
+	positions, err := c.client.GetPositions(ctx)
+	if err != nil {
+		if len(positions) == 0 {
+			log.Printf("활성 포지션 없음: %s", coinSignal.Symbol)
+		} else {
+			return false, "", 0, err
+		}
+
+	}
+
+	for _, pos := range positions {
+		if pos.Symbol == coinSignal.Symbol {
+			if coinSignal.Type == signal.Long && pos.PositionSide == "LONG" {
+				return false, "이미 롱 포지션이 있습니다", 0, nil
+			}
+			if coinSignal.Type == signal.Short && pos.PositionSide == "SHORT" {
+				return false, "이미 숏 포지션이 있습니다", 0, nil
+			}
+		}
+	}
+
+	// 2. 잔고 조회
+	balances, err := c.client.GetBalance(ctx)
+	if err != nil {
+		return false, "", 0, fmt.Errorf("잔고 조회 실패: %w", err)
+	}
+
+	// USDT 잔고 확인
+	usdtBalance, exists := balances["USDT"]
+	if !exists {
+		return false, "USDT 잔고가 없습니다", 0, nil
+	}
+
+	// 3. 매수 가능한 수령 계산 (우선 100% 사용)
+	// 이곳에서 현재가를 매수가처럼 사용했지만 실제 매매에서는 시장가로 살 것이기에 가격 조회 1회가 필요하다.
+	quantity := c.calculatequantity(usdtBalance.Available, coinSignal.Price, 100)
+
+	if quantity < 0.001 {
+		return false, fmt.Sprintf("잔고 부족 (필요: %.2f USDT, 보유: %.2f USDT)", coinSignal.Price*0.001, usdtBalance.Available), 0, nil
+	}
+
+	return true, "", quantity, nil
 }
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다

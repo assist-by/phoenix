@@ -389,6 +389,32 @@ func (c *Client) GetTopVolumeSymbols(ctx context.Context, n int) ([]string, erro
 	return symbols, nil
 }
 
+// GetPositions는 현재 열림 포지션을 조회합니다
+func (c *Client) GetPositions(ctx context.Context) ([]PositionInfo, error) {
+	params := url.Values{}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v2/positionRisk", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("포지션 조회 실패: %w", err)
+	}
+
+	var positions []PositionInfo
+	if err := json.Unmarshal(resp, &positions); err != nil {
+		return nil, fmt.Errorf("포지션 데이터 파싱 실패: %w", err)
+	}
+
+	activePositions := []PositionInfo{}
+	for _, p := range positions {
+		if p.Quantity != 0 {
+			activePositions = append(activePositions, p)
+		}
+	}
+	return activePositions, nil
+}
+
+// =================================
+// 시간 관련된 함수
+
 // SyncTime은 바이낸스 서버와 시간을 동기화합니다
 func (c *Client) SyncTime(ctx context.Context) error {
 	c.mu.Lock()
