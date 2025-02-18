@@ -20,6 +20,32 @@ GOOS=linux GOARCH=amd64 go build -o phoenix ./cmd/trader
 $env:GOOS="linux"; $env:GOARCH="amd64"; go build -o phoenix ./cmd/trader
 ```
 
+
+## Linux에서 백그라운드 실행하는 법
+
+```bash
+nohup ./phoenix &
+```
+
+```bash
+nohup ./phoenix > /dev/null 2>&1 &
+```
+
+
+## 정상 종료 하는 방법
+
+```bash
+ps aux | grep phoenix
+
+# 정상 종료
+kill -15 [PID번호]
+
+# 강제 종료 (필요시)
+kill -9 [PID번호]
+```
+
+
+
 ## 매매 알고리즘
 
 ```mermaid
