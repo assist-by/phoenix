@@ -1,5 +1,42 @@
-# Project Documentation
-## E:\phoenix\cmd\trader\main.go
+# phoenix
+## Project Structure
+
+```
+phoenix/
+├── cmd/
+    └── trader/
+    │   └── main.go
+└── internal/
+    ├── analysis/
+        ├── indicator/
+        │   ├── ema.go
+        │   ├── indicator_test.go
+        │   ├── macd.go
+        │   ├── sar.go
+        │   └── types.go
+        └── signal/
+        │   ├── detector.go
+        │   ├── signal_test.go
+        │   ├── state.go
+        │   └── types.go
+    ├── config/
+        └── config.go
+    ├── market/
+        ├── client.go
+        ├── collector.go
+        └── types.go
+    ├── notification/
+        ├── discord/
+        │   ├── client.go
+        │   ├── embed.go
+        │   ├── signal.go
+        │   └── webhook.go
+        └── types.go
+    └── scheduler/
+        └── scheduler.go
+```
+
+## cmd/trader/main.go
 ```go
 package main
 
@@ -139,7 +176,7 @@ func main() {
 }
 
 ```
-## E:\phoenix\internal\analysis\indicator\ema.go
+## internal/analysis/indicator/ema.go
 ```go
 package indicator
 
@@ -213,7 +250,7 @@ func EMA(prices []PriceData, opt EMAOption) ([]Result, error) {
 }
 
 ```
-## E:\phoenix\internal\analysis\indicator\indicator_test.go
+## internal/analysis/indicator/indicator_test.go
 ```go
 package indicator
 
@@ -420,7 +457,7 @@ func TestAll(t *testing.T) {
 }
 
 ```
-## E:\phoenix\internal\analysis\indicator\macd.go
+## internal/analysis/indicator/macd.go
 ```go
 package indicator
 
@@ -518,7 +555,7 @@ func MACD(prices []PriceData, opt MACDOption) ([]MACDResult, error) {
 }
 
 ```
-## E:\phoenix\internal\analysis\indicator\sar.go
+## internal/analysis/indicator/sar.go
 ```go
 package indicator
 
@@ -569,95 +606,51 @@ type SARResult struct {
 
 // SAR은 Parabolic SAR 지표를 계산합니다
 func SAR(prices []PriceData, opt SAROption) ([]SARResult, error) {
-	if err := ValidateSAROption(opt); err != nil {
-		return nil, err
-	}
-
-	if len(prices) < 2 {
-		return nil, &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("최소 2개의 가격 데이터가 필요합니다"),
-		}
-	}
-
 	results := make([]SARResult, len(prices))
-
-	// 초기값 설정
-	isLong := prices[1].Close > prices[0].Close
-	extremePoint := 0.0
+	// 초기값 설정 단순화
 	af := opt.AccelerationInitial
-	sar := 0.0
+	sar := prices[0].Low
+	ep := prices[0].High
+	isLong := true
 
-	if isLong {
-		sar = prices[0].Low
-		extremePoint = prices[1].High
-	} else {
-		sar = prices[0].High
-		extremePoint = prices[1].Low
-	}
-
-	// 첫 번째 결과 저장
-	results[0] = SARResult{
-		SAR:       sar,
-		IsLong:    isLong,
-		Timestamp: prices[0].Time,
-	}
+	results[0] = SARResult{SAR: sar, IsLong: isLong, Timestamp: prices[0].Time}
 
 	// SAR 계산
 	for i := 1; i < len(prices); i++ {
-		prevSAR := sar
-
-		// SAR 값 계산
-		sar = prevSAR + af*(extremePoint-prevSAR)
-
-		// 현재 추세가 상승일 때
 		if isLong {
-			// SAR는 이전 두 봉의 저점보다 높을 수 없음
-			if i > 1 {
-				minLow := math.Min(prices[i-1].Low, prices[i].Low)
-				if sar > minLow {
-					sar = minLow
-				}
-			}
+			sar = sar + af*(ep-sar)
 
-			// 새로운 고점 발견 시 가속도 증가
-			if prices[i].High > extremePoint {
-				extremePoint = prices[i].High
+			// 새로운 고점 발견
+			if prices[i].High > ep {
+				ep = prices[i].High
 				af = math.Min(af+opt.AccelerationInitial, opt.AccelerationMax)
 			}
 
-			// 추세 전환 확인
-			if prices[i].Low < sar {
+			// 추세 전환 체크
+			if sar > prices[i].Low {
 				isLong = false
-				sar = extremePoint
-				extremePoint = prices[i].Low
+				sar = ep
+				ep = prices[i].Low
 				af = opt.AccelerationInitial
 			}
 		} else {
-			// SAR는 이전 두 봉의 고점보다 낮을 수 없음
-			if i > 1 {
-				maxHigh := math.Max(prices[i-1].High, prices[i].High)
-				if sar < maxHigh {
-					sar = maxHigh
-				}
-			}
+			sar = sar - af*(sar-ep)
 
-			// 새로운 저점 발견 시 가속도 증가
-			if prices[i].Low < extremePoint {
-				extremePoint = prices[i].Low
+			// 새로운 저점 발견
+			if prices[i].Low < ep {
+				ep = prices[i].Low
 				af = math.Min(af+opt.AccelerationInitial, opt.AccelerationMax)
 			}
 
-			// 추세 전환 확인
-			if prices[i].High > sar {
+			// 추세 전환 체크
+			if sar < prices[i].High {
 				isLong = true
-				sar = extremePoint
-				extremePoint = prices[i].High
+				sar = ep
+				ep = prices[i].High
 				af = opt.AccelerationInitial
 			}
 		}
 
-		// 결과 저장
 		results[i] = SARResult{
 			SAR:       sar,
 			IsLong:    isLong,
@@ -669,7 +662,7 @@ func SAR(prices []PriceData, opt SAROption) ([]SARResult, error) {
 }
 
 ```
-## E:\phoenix\internal\analysis\indicator\types.go
+## internal/analysis/indicator/types.go
 ```go
 package indicator
 
@@ -705,7 +698,7 @@ func (e ValidationError) Error() string {
 }
 
 ```
-## E:\phoenix\internal\analysis\signal\detector.go
+## internal/analysis/signal/detector.go
 ```go
 package signal
 
@@ -722,14 +715,16 @@ func NewDetector(config DetectorConfig) *Detector {
 		emaLength:     config.EMALength,
 		stopLossPct:   config.StopLossPct,
 		takeProfitPct: config.TakeProfitPct,
+		minHistogram:  config.MinHistogram,
 	}
 }
 
 // DetectorConfig는 시그널 감지기 설정을 정의합니다
 type DetectorConfig struct {
-	EMALength     int     // EMA 기간 (기본값: 200)
-	StopLossPct   float64 // 손절 비율 (기본값: 0.02 -> 2%)
-	TakeProfitPct float64 // 익절 비율 (기본값: 0.04 -> 4%)
+	EMALength     int // EMA 기간 (기본값: 200)
+	StopLossPct   float64
+	TakeProfitPct float64
+	MinHistogram  float64 // 최소 MACD 히스토그램 값 (기본값: 0.00005)
 }
 
 // Detect는 주어진 데이터로부터 시그널을 감지합니다
@@ -784,9 +779,13 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		Timestamp: prices[len(prices)-1].Time,
 	}
 
-	// Long 시그널 조건 수정
+	// MACD 히스토그램 계산
+	histogram := currentMACD - currentSignal
+
+	// Long 시그널
 	if currentPrice > ema[len(ema)-1].Value && // EMA 200 위
 		macdCross == 1 && // MACD 상향 돌파
+		histogram >= d.minHistogram && // MACD 히스토그램이 최소값 이상
 		sar[len(sar)-1].SAR < prices[len(prices)-1].Low { // SAR이 현재 봉의 저가보다 낮음
 
 		signal.Type = Long
@@ -794,9 +793,10 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		signal.TakeProfit = currentPrice + (currentPrice - signal.StopLoss) // 1:1 비율
 	}
 
-	// Short 시그널 조건 수정
+	// Short 시그널
 	if currentPrice < ema[len(ema)-1].Value && // EMA 200 아래
 		macdCross == -1 && // MACD 하향 돌파
+		-histogram >= d.minHistogram && // 음수 히스토그램에 대한 조건
 		sar[len(sar)-1].SAR > prices[len(prices)-1].High { // SAR이 현재 봉의 고가보다 높음
 
 		signal.Type = Short
@@ -852,7 +852,274 @@ func (d *Detector) checkMACDCross(currentMACD, currentSignal, prevMACD, prevSign
 // }
 
 ```
-## E:\phoenix\internal\analysis\signal\state.go
+## internal/analysis/signal/signal_test.go
+```go
+package signal
+
+import (
+	"math"
+	"testing"
+	"time"
+
+	"github.com/assist-by/phoenix/internal/analysis/indicator"
+)
+
+// 롱 시그널을 위한 테스트 데이터 생성
+func generateLongSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250) // EMA 200 계산을 위해 충분한 데이터
+
+	// 초기 하락 추세 생성 (0-99)
+	startPrice := 100.0
+	for i := 0; i < 100; i++ {
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - float64(i)*0.1,
+			High:   startPrice - float64(i)*0.1 + 0.05,
+			Low:    startPrice - float64(i)*0.1 - 0.05,
+			Close:  startPrice - float64(i)*0.1,
+			Volume: 1000.0,
+		}
+	}
+
+	// 상승 추세로 전환 (100-199)
+	for i := 100; i < 200; i++ {
+		increment := float64(i-99) * 0.15
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + increment,
+			High:   startPrice + increment + 0.05,
+			Low:    startPrice + increment - 0.05,
+			Close:  startPrice + increment,
+			Volume: 1500.0,
+		}
+	}
+
+	// 마지막 구간에서 강한 상승 추세 (200-249)
+	// MACD 골든크로스와 SAR 하향 전환을 만들기 위한 데이터
+	for i := 200; i < 250; i++ {
+		increment := float64(i-199) * 0.3
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 15.0 + increment,
+			High:   startPrice + 15.0 + increment + 0.1,
+			Low:    startPrice + 15.0 + increment - 0.05,
+			Close:  startPrice + 15.0 + increment + 0.08,
+			Volume: 2000.0,
+		}
+	}
+
+	return prices
+}
+
+// 숏 시그널을 위한 테스트 데이터 생성
+func generateShortSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250)
+
+	// 초기 상승 추세 생성 (0-99)
+	startPrice := 100.0
+	for i := 0; i < 100; i++ {
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + float64(i)*0.1,
+			High:   startPrice + float64(i)*0.1 + 0.05,
+			Low:    startPrice + float64(i)*0.1 - 0.05,
+			Close:  startPrice + float64(i)*0.1,
+			Volume: 1000.0,
+		}
+	}
+
+	// 하락 추세로 전환 (100-199)
+	for i := 100; i < 200; i++ {
+		decrement := float64(i-99) * 0.15
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - decrement,
+			High:   startPrice - decrement + 0.05,
+			Low:    startPrice - decrement - 0.05,
+			Close:  startPrice - decrement,
+			Volume: 1500.0,
+		}
+	}
+
+	// 마지막 구간에서 강한 하락 추세 (200-249)
+	for i := 200; i < 250; i++ {
+		decrement := float64(i-199) * 0.3
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 15.0 - decrement,
+			High:   startPrice - 15.0 - decrement + 0.05,
+			Low:    startPrice - 15.0 - decrement - 0.1,
+			Close:  startPrice - 15.0 - decrement - 0.08,
+			Volume: 2000.0,
+		}
+	}
+
+	return prices
+}
+
+// 시그널이 발생하지 않는 데이터 생성
+func generateNoSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250)
+
+	// EMA200 주변에서 횡보하는 데이터 생성
+	startPrice := 100.0
+	for i := 0; i < 250; i++ {
+		// sin 곡선을 사용하여 EMA200 주변에서 진동하는 가격 생성
+		cycle := float64(i) * 0.1
+		variation := math.Sin(cycle) * 0.5
+
+		price := startPrice + variation
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   price - 0.1,
+			High:   price + 0.2,
+			Low:    price - 0.2,
+			Close:  price,
+			Volume: 1000.0 + math.Abs(variation)*100,
+		}
+	}
+
+	return prices
+}
+
+func TestDetector_Detect(t *testing.T) {
+	tests := []struct {
+		name           string
+		prices         []indicator.PriceData
+		expectedSignal SignalType
+		wantErr        bool
+	}{
+		{
+			name:           "롱 시그널 테스트",
+			prices:         generateLongSignalPrices(),
+			expectedSignal: Long,
+			wantErr:        false,
+		},
+		{
+			name:           "숏 시그널 테스트",
+			prices:         generateShortSignalPrices(),
+			expectedSignal: Short,
+			wantErr:        false,
+		},
+		{
+			name:           "무시그널 테스트",
+			prices:         generateNoSignalPrices(),
+			expectedSignal: NoSignal,
+			wantErr:        false,
+		},
+		{
+			name:           "데이터 부족 테스트",
+			prices:         generateLongSignalPrices()[:150], // 200개 미만의 데이터
+			expectedSignal: NoSignal,
+			wantErr:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			detector := NewDetector(DetectorConfig{
+				EMALength:     200,
+				StopLossPct:   0.02,
+				TakeProfitPct: 0.04,
+			})
+
+			signal, err := detector.Detect("BTCUSDT", tt.prices)
+
+			// 에러 검증
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Detect() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if err != nil {
+				return
+			}
+
+			// 시그널 타입 검증
+			if signal.Type != tt.expectedSignal {
+				t.Errorf("Expected %v signal, got %v", tt.expectedSignal, signal.Type)
+			}
+
+			// 시그널 타입별 추가 검증
+			switch signal.Type {
+			case Long:
+				validateLongSignal(t, signal)
+			case Short:
+				validateShortSignal(t, signal)
+			case NoSignal:
+				validateNoSignal(t, signal)
+			}
+		})
+	}
+}
+
+func validateLongSignal(t *testing.T, signal *Signal) {
+	if !signal.Conditions.EMALong {
+		t.Error("Expected price to be above EMA200")
+	}
+	if !signal.Conditions.MACDLong {
+		t.Error("Expected MACD to cross above Signal line")
+	}
+	if !signal.Conditions.SARLong {
+		t.Error("Expected SAR to be below price")
+	}
+	validateRiskRewardRatio(t, signal)
+}
+
+func validateShortSignal(t *testing.T, signal *Signal) {
+	if !signal.Conditions.EMAShort {
+		t.Error("Expected price to be below EMA200")
+	}
+	if !signal.Conditions.MACDShort {
+		t.Error("Expected MACD to cross below Signal line")
+	}
+	if !signal.Conditions.SARShort {
+		t.Error("Expected SAR to be above price")
+	}
+	validateRiskRewardRatio(t, signal)
+}
+
+func validateNoSignal(t *testing.T, signal *Signal) {
+	if signal.StopLoss != 0 || signal.TakeProfit != 0 {
+		t.Error("NoSignal should have zero StopLoss and TakeProfit")
+	}
+}
+
+func validateRiskRewardRatio(t *testing.T, signal *Signal) {
+	if signal.StopLoss == 0 || signal.TakeProfit == 0 {
+		t.Error("StopLoss and TakeProfit should be non-zero")
+		return
+	}
+
+	var riskAmount, rewardAmount float64
+	if signal.Type == Long {
+		riskAmount = signal.Price - signal.StopLoss
+		rewardAmount = signal.TakeProfit - signal.Price
+	} else {
+		riskAmount = signal.StopLoss - signal.Price
+		rewardAmount = signal.Price - signal.TakeProfit
+	}
+
+	if !almostEqual(riskAmount, rewardAmount, 0.0001) {
+		t.Errorf("Risk:Reward ratio is not 1:1 (Risk: %.2f, Reward: %.2f)",
+			riskAmount, rewardAmount)
+	}
+}
+
+// 부동소수점 비교를 위한 헬퍼 함수
+func almostEqual(a, b, tolerance float64) bool {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= tolerance
+}
+
+```
+## internal/analysis/signal/state.go
 ```go
 package signal
 
@@ -873,7 +1140,7 @@ func (d *Detector) getSymbolState(symbol string) *SymbolState {
 }
 
 ```
-## E:\phoenix\internal\analysis\signal\types.go
+## internal/analysis/signal/types.go
 ```go
 package signal
 
@@ -929,11 +1196,12 @@ type Detector struct {
 	emaLength     int     // EMA 기간
 	stopLossPct   float64 // 손절 비율
 	takeProfitPct float64 // 익절 비율
+	minHistogram  float64 // MACD 히스토그램 최소값
 	mu            sync.RWMutex
 }
 
 ```
-## E:\phoenix\internal\config\config.go
+## internal/config/config.go
 ```go
 package config
 
@@ -965,6 +1233,28 @@ type Config struct {
 		FetchInterval time.Duration `envconfig:"FETCH_INTERVAL" default:"15m"`
 		CandleLimit   int           `envconfig:"CANDLE_LIMIT" default:"100"`
 	}
+
+	// 거래 설정
+	Trading struct {
+		Leverage int `envconfig:"LEVERAGE" default:"5" validate:"min=1,max=100"`
+	}
+}
+
+// ValidateConfig는 설정이 유효한지 확인합니다.
+func ValidateConfig(cfg *Config) error {
+	if cfg.Trading.Leverage < 1 || cfg.Trading.Leverage > 100 {
+		return fmt.Errorf("레버리지는 1 이상 100 이하이어야 합니다")
+	}
+
+	if cfg.App.FetchInterval < 1*time.Minute {
+		return fmt.Errorf("FETCH_INTERVAL은 1분 이상이어야 합니다")
+	}
+
+	if cfg.App.CandleLimit < 300 {
+		return fmt.Errorf("CANDLE_LIMIT은 300 이상이어야 합니다")
+	}
+
+	return nil
 }
 
 // LoadConfig는 환경변수에서 설정을 로드합니다.
@@ -980,11 +1270,16 @@ func LoadConfig() (*Config, error) {
 		return nil, fmt.Errorf("환경변수 처리 실패: %w", err)
 	}
 
+	// 설정값 검증
+	if err := ValidateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("설정값 검증 실패: %w", err)
+	}
+
 	return &cfg, nil
 }
 
 ```
-## E:\phoenix\internal\market\client.go
+## internal/market/client.go
 ```go
 package market
 
@@ -1406,7 +1701,7 @@ func (c *Client) getServerTime() int64 {
 }
 
 ```
-## E:\phoenix\internal\market\collector.go
+## internal/market/collector.go
 ```go
 // internal/market/collector.go
 
@@ -1651,7 +1946,7 @@ func (c *Collector) withRetry(ctx context.Context, operation string, fn func() e
 }
 
 ```
-## E:\phoenix\internal\market\types.go
+## internal/market/types.go
 ```go
 package market
 
@@ -1752,7 +2047,7 @@ type SymbolVolume struct {
 }
 
 ```
-## E:\phoenix\internal\notification\discord\client.go
+## internal/notification/discord/client.go
 ```go
 package discord
 
@@ -1828,7 +2123,7 @@ func (c *Client) sendToWebhook(webhookURL string, message WebhookMessage) error 
 }
 
 ```
-## E:\phoenix\internal\notification\discord\embed.go
+## internal/notification/discord/embed.go
 ```go
 package discord
 
@@ -1917,7 +2212,7 @@ func (e *Embed) SetTimestamp(t time.Time) *Embed {
 }
 
 ```
-## E:\phoenix\internal\notification\discord\signal.go
+## internal/notification/discord/signal.go
 ```go
 package discord
 
@@ -2010,7 +2305,7 @@ func getCheckMark(condition bool) string {
 }
 
 ```
-## E:\phoenix\internal\notification\discord\webhook.go
+## internal/notification/discord/webhook.go
 ```go
 package discord
 
@@ -2101,7 +2396,7 @@ func getColorForSignal(signalType notification.SignalType) int {
 }
 
 ```
-## E:\phoenix\internal\notification\types.go
+## internal/notification/types.go
 ```go
 package notification
 
@@ -2163,7 +2458,7 @@ func GetColorForPosition(positionType string) int {
 }
 
 ```
-## E:\phoenix\internal\scheduler\scheduler.go
+## internal/scheduler/scheduler.go
 ```go
 package scheduler
 

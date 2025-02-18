@@ -1,0 +1,8 @@
+go.mod
+go.sum
+**/*.md
+
+**/.env
+**/*.exe
+.codeignore
+**/phoenix_v*
