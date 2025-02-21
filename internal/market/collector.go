@@ -115,36 +115,6 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
-
-			brackets, err := c.client.GetLeverageBrackets(ctx, symbol)
-			if err != nil {
-				return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
-			}
-
-			var symbolBracket *SymbolBrackets
-			for _, b := range brackets {
-				if b.Symbol == symbol {
-					symbolBracket = &b
-					break
-				}
-			}
-
-			if symbolBracket != nil && len(symbolBracket.Brackets) > 0 {
-				info := fmt.Sprintf("%s 유지증거금 정보:\n```", symbol)
-				for _, bracket := range symbolBracket.Brackets {
-					info += fmt.Sprintf("\n구간 %d: 최대레버리지 %dx, 유지증거금율 %.4f%%, 최대 포지션 %.2f USDT",
-						bracket.Bracket,
-						bracket.InitialLeverage,
-						bracket.MaintMarginRatio*100,
-						bracket.Notional)
-				}
-				info += "```"
-
-				if err := c.discord.SendInfo(info); err != nil {
-					log.Printf("유지증거금 정보 알림 전송 실패: %v", err)
-				}
-			}
-
 			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
 			if err != nil {
 				return err
