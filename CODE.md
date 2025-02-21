@@ -1158,6 +1158,19 @@ const (
 	Short
 )
 
+func (s SignalType) String() string {
+	switch s {
+	case NoSignal:
+		return "NoSignal"
+	case Long:
+		return "Long"
+	case Short:
+		return "Short"
+	default:
+		return "Unknown"
+	}
+}
+
 // SignalConditions는 시그널 발생 조건들의 상세 정보를 저장합니다
 type SignalConditions struct {
 	EMALong     bool    // 가격이 EMA 위
@@ -1672,6 +1685,52 @@ func (c *Client) GetTopVolumeSymbols(ctx context.Context, n int) ([]string, erro
 	return symbols, nil
 }
 
+// GetPositions는 현재 열림 포지션을 조회합니다
+func (c *Client) GetPositions(ctx context.Context) ([]PositionInfo, error) {
+	params := url.Values{}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v2/positionRisk", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("포지션 조회 실패: %w", err)
+	}
+
+	var positions []PositionInfo
+	if err := json.Unmarshal(resp, &positions); err != nil {
+		return nil, fmt.Errorf("포지션 데이터 파싱 실패: %w", err)
+	}
+
+	activePositions := []PositionInfo{}
+	for _, p := range positions {
+		if p.Quantity != 0 {
+			activePositions = append(activePositions, p)
+		}
+	}
+	return activePositions, nil
+}
+
+// GetLeverageBrackets는 심볼의 레버리지 브라켓 정보를 조회합니다
+func (c *Client) GetLeverageBrackets(ctx context.Context, symbol string) ([]SymbolBrackets, error) {
+	params := url.Values{}
+	if symbol != "" {
+		params.Add("symbol", symbol)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/leverageBracket", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+	}
+
+	var brackets []SymbolBrackets
+	if err := json.Unmarshal(resp, &brackets); err != nil {
+		return nil, fmt.Errorf("레버리지 브라켓 데이터 파싱 실패: %w", err)
+	}
+
+	return brackets, nil
+}
+
+// =================================
+// 시간 관련된 함수
+
 // SyncTime은 바이낸스 서버와 시간을 동기화합니다
 func (c *Client) SyncTime(ctx context.Context) error {
 	c.mu.Lock()
@@ -1703,19 +1762,19 @@ func (c *Client) getServerTime() int64 {
 ```
 ## internal/market/collector.go
 ```go
-// internal/market/collector.go
-
 package market
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 
 	"github.com/assist-by/phoenix/internal/analysis/indicator"
 	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 )
 
@@ -1820,6 +1879,36 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
+
+			brackets, err := c.client.GetLeverageBrackets(ctx, symbol)
+			if err != nil {
+				return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+			}
+
+			var symbolBracket *SymbolBrackets
+			for _, b := range brackets {
+				if b.Symbol == symbol {
+					symbolBracket = &b
+					break
+				}
+			}
+
+			if symbolBracket != nil && len(symbolBracket.Brackets) > 0 {
+				info := fmt.Sprintf("%s 유지증거금 정보:\n```", symbol)
+				for _, bracket := range symbolBracket.Brackets {
+					info += fmt.Sprintf("\n구간 %d: 최대레버리지 %dx, 유지증거금율 %.4f%%, 최대 포지션 %.2f USDT",
+						bracket.Bracket,
+						bracket.InitialLeverage,
+						bracket.MaintMarginRatio*100,
+						bracket.Notional)
+				}
+				info += "```"
+
+				if err := c.discord.SendInfo(info); err != nil {
+					log.Printf("유지증거금 정보 알림 전송 실패: %v", err)
+				}
+			}
+
 			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
 			if err != nil {
 				return err
@@ -1850,10 +1939,51 @@ func (c *Collector) Collect(ctx context.Context) error {
 			// 시그널 정보 로깅
 			log.Printf("%s 시그널 감지 결과: %+v", symbol, s)
 
-			// 시그널이 있으면 Discord로 전송
 			if s != nil {
 				if err := c.discord.SendSignal(s); err != nil {
 					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
+				}
+
+				if s.Type != signal.NoSignal {
+					// 진입 가능 여부 확인
+					available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+					if err != nil {
+						log.Printf("진입 가능 여부 확인 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+
+					}
+
+					if !available {
+						log.Printf("진입 불가: %s", reason)
+
+					}
+
+					balances, err := c.client.GetBalance(ctx)
+					if err != nil {
+						return fmt.Errorf("잔고 조회 실패: %w", err)
+					}
+					usdtBalance := balances["USDT"].Available
+
+					// TradeInfo 생성
+					tradeInfo := notification.TradeInfo{
+						Symbol:        s.Symbol,
+						PositionType:  s.Type.String(),
+						PositionValue: positionValue,
+						EntryPrice:    s.Price,
+						StopLoss:      s.StopLoss,
+						TakeProfit:    s.TakeProfit,
+						Balance:       usdtBalance,
+						Leverage:      5,
+					}
+
+					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+						log.Printf("거래 정보 알림 전송 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+					}
 				}
 			}
 
@@ -1866,6 +1996,126 @@ func (c *Collector) Collect(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// calculatePositionValue는 수수료와 유지증거금을 고려하여 최대 포지션 크기를 계산합니다
+// 최대 포지션 크기 계산식
+// 최대 포지션 = 가용잔고 × 레버리지 / (1 + 유지증거금률 + 총수수료율)
+func (c *Collector) calculatePositionValue(
+	balance float64,
+	leverage int,
+	maintMargin float64,
+) float64 {
+	// 수수료율 (진입 + 청산)
+	totalFeeRate := 0.001 // 0.1%
+
+	// 포지션 크기 계산
+	positionSize := (balance * float64(leverage)) / (1 + maintMargin + totalFeeRate)
+
+	return math.Floor(positionSize*100) / 100 // 소수점 2자리까지 내림
+}
+
+// findBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
+func findBracket(brackets []LeverageBracket, leverage int) *LeverageBracket {
+	// 레버리지가 높은 순으로 정렬되어 있으므로,
+	// 설정된 레버리지보다 크거나 같은 첫 번째 브라켓을 찾습니다.
+	for i := len(brackets) - 1; i >= 0; i-- {
+		if brackets[i].InitialLeverage >= leverage {
+			return &brackets[i]
+		}
+	}
+
+	// 찾지 못한 경우 가장 낮은 레버리지 브라켓 반환
+	if len(brackets) > 0 {
+		return &brackets[0]
+	}
+	return nil
+}
+
+func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, string, float64, error) {
+	// 1. 현재 포지션 조회
+	positions, err := c.client.GetPositions(ctx)
+	if err != nil {
+		if len(positions) == 0 {
+			log.Printf("활성 포지션 없음: %s", coinSignal.Symbol)
+		} else {
+			return false, "", 0, err
+		}
+
+	}
+
+	// 포지션 체크크
+	for _, pos := range positions {
+		if pos.Symbol == coinSignal.Symbol {
+			if coinSignal.Type == signal.Long && pos.PositionSide == "LONG" {
+				return false, "이미 롱 포지션이 있습니다", 0, nil
+			}
+			if coinSignal.Type == signal.Short && pos.PositionSide == "SHORT" {
+				return false, "이미 숏 포지션이 있습니다", 0, nil
+			}
+		}
+	}
+
+	// 2. 잔고 조회
+	balances, err := c.client.GetBalance(ctx)
+	if err != nil {
+		return false, "", 0, fmt.Errorf("잔고 조회 실패: %w", err)
+	}
+
+	// USDT 잔고 확인
+	usdtBalance, exists := balances["USDT"]
+	if !exists {
+		return false, "USDT 잔고가 없습니다", 0, nil
+	}
+
+	// 3. 레버리지 브라켓 정보 조회
+	brackets, err := c.client.GetLeverageBrackets(ctx, coinSignal.Symbol)
+	if err != nil {
+		return false, "", 0, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+	}
+
+	// 해당 심볼의 브라켓 정보 찾기
+	var symbolBracket *SymbolBrackets
+	for _, b := range brackets {
+		if b.Symbol == coinSignal.Symbol {
+			symbolBracket = &b
+			break
+		}
+	}
+
+	if symbolBracket == nil || len(symbolBracket.Brackets) == 0 {
+		return false, "레버리지 브라켓 정보가 없습니다", 0, nil
+	}
+
+	// 설정된 레버리지에 맞는 브라켓 찾기
+	leverage := 5 // 레버리지 설정값
+	bracket := findBracket(symbolBracket.Brackets, leverage)
+	if bracket == nil {
+		return false, "적절한 레버리지 브라켓을 찾을 수 없습니다", 0, nil
+	}
+
+	// 브라켓 정보 로깅
+	log.Printf("선택된 브라켓: 레버리지 %dx, 유지증거금률 %.4f%%, 최대 포지션 %.2f USDT",
+		bracket.InitialLeverage,
+		bracket.MaintMarginRatio*100,
+		bracket.Notional)
+
+	if err := c.discord.SendInfo(fmt.Sprintf("```\n%s\n레버리지: %dx\n유지증거금률: %.4f%%\n최대 포지션: %.2f USDT\n```",
+		coinSignal.Symbol,
+		bracket.InitialLeverage,
+		bracket.MaintMarginRatio*100,
+		bracket.Notional)); err != nil {
+		log.Printf("브라켓 정보 알림 전송 실패: %v", err)
+	}
+
+	// 4. 포지션 크기 계산
+	positionValue := c.calculatePositionValue(
+		usdtBalance.Available,
+		leverage,
+		bracket.MaintMarginRatio,
+	)
+
+	return true, "", positionValue, nil
 }
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다
@@ -2044,6 +2294,27 @@ type OrderResponse struct {
 type SymbolVolume struct {
 	Symbol      string  `json:"symbol"`
 	QuoteVolume float64 `json:"quoteVolume,string"`
+}
+
+type PositionInfo struct {
+	Symbol       string  `json:"symbol"`
+	PositionSide string  `json:"positionSide"`
+	Quantity     float64 `json:"positionAmt,string"`
+	EntryPrice   float64 `json:"entryPrice,string"`
+}
+
+// LeverageBracket은 레버리지 구간 정보를 나타냅니다
+type LeverageBracket struct {
+	Bracket          int     `json:"bracket"`          // 구간 번호
+	InitialLeverage  int     `json:"initialLeverage"`  // 최대 레버리지
+	MaintMarginRatio float64 `json:"maintMarginRatio"` // 유지증거금 비율
+	Notional         float64 `json:"notional"`         // 명목가치 상한
+}
+
+// SymbolBrackets는 심볼별 레버리지 구간 정보를 나타냅니다
+type SymbolBrackets struct {
+	Symbol   string            `json:"symbol"`
+	Brackets []LeverageBracket `json:"brackets"`
 }
 
 ```
@@ -2382,8 +2653,14 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	embed := NewEmbed().
 		SetTitle(fmt.Sprintf("거래 실행: %s", info.Symbol)).
 		SetDescription(fmt.Sprintf(
-			"**포지션**: %s\n**수량**: %.8f\n**가격**: $%.2f\n**손절가**: $%.2f\n**목표가**: $%.2f",
-			info.PositionType, info.Quantity, info.EntryPrice, info.StopLoss, info.TakeProfit,
+			"**포지션**: %s\n**포지션 크기**: %.2f USDT\n**레버리지**: %dx\n**진입가**: $%.2f\n**손절가**: $%.2f\n**목표가**: $%.2f\n**현재 잔고**: %.2f USDT",
+			info.PositionType,
+			info.PositionValue,
+			info.Leverage,
+			info.EntryPrice,
+			info.StopLoss,
+			info.TakeProfit,
+			info.Balance,
 		)).
 		SetColor(notification.GetColorForPosition(info.PositionType)).
 		SetFooter("Assist by Trading Bot 🤖").
@@ -2450,12 +2727,14 @@ type Notifier interface {
 
 // TradeInfo는 거래 실행 정보를 정의합니다
 type TradeInfo struct {
-	Symbol       string
-	PositionType string // "LONG" or "SHORT"
-	Quantity     float64
-	EntryPrice   float64
-	StopLoss     float64
-	TakeProfit   float64
+	Symbol        string
+	PositionType  string // "LONG" or "SHORT"
+	PositionValue float64
+	EntryPrice    float64
+	StopLoss      float64
+	TakeProfit    float64
+	Balance       float64 // 현재 USDT 잔고
+	Leverage      int     // 사용 레버리지
 }
 
 // getColorForPosition은 포지션 타입에 따른 색상을 반환합니다

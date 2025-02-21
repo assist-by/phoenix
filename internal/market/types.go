@@ -102,3 +102,17 @@ type PositionInfo struct {
 	Quantity     float64 `json:"positionAmt,string"`
 	EntryPrice   float64 `json:"entryPrice,string"`
 }
+
+// LeverageBracket은 레버리지 구간 정보를 나타냅니다
+type LeverageBracket struct {
+	Bracket          int     `json:"bracket"`          // 구간 번호
+	InitialLeverage  int     `json:"initialLeverage"`  // 최대 레버리지
+	MaintMarginRatio float64 `json:"maintMarginRatio"` // 유지증거금 비율
+	Notional         float64 `json:"notional"`         // 명목가치 상한
+}
+
+// SymbolBrackets는 심볼별 레버리지 구간 정보를 나타냅니다
+type SymbolBrackets struct {
+	Symbol   string            `json:"symbol"`
+	Brackets []LeverageBracket `json:"brackets"`
+}

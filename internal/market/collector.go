@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math"
 	"sync"
 	"time"
 
@@ -114,6 +115,36 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
+
+			brackets, err := c.client.GetLeverageBrackets(ctx, symbol)
+			if err != nil {
+				return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+			}
+
+			var symbolBracket *SymbolBrackets
+			for _, b := range brackets {
+				if b.Symbol == symbol {
+					symbolBracket = &b
+					break
+				}
+			}
+
+			if symbolBracket != nil && len(symbolBracket.Brackets) > 0 {
+				info := fmt.Sprintf("%s 유지증거금 정보:\n```", symbol)
+				for _, bracket := range symbolBracket.Brackets {
+					info += fmt.Sprintf("\n구간 %d: 최대레버리지 %dx, 유지증거금율 %.4f%%, 최대 포지션 %.2f USDT",
+						bracket.Bracket,
+						bracket.InitialLeverage,
+						bracket.MaintMarginRatio*100,
+						bracket.Notional)
+				}
+				info += "```"
+
+				if err := c.discord.SendInfo(info); err != nil {
+					log.Printf("유지증거금 정보 알림 전송 실패: %v", err)
+				}
+			}
+
 			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
 			if err != nil {
 				return err
@@ -151,7 +182,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 				if s.Type != signal.NoSignal {
 					// 진입 가능 여부 확인
-					available, reason, quantity, err := c.checkEntryAvailable(ctx, s)
+					available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
 					if err != nil {
 						log.Printf("진입 가능 여부 확인 실패: %v", err)
 						if err := c.discord.SendError(err); err != nil {
@@ -165,13 +196,22 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 					}
 
+					balances, err := c.client.GetBalance(ctx)
+					if err != nil {
+						return fmt.Errorf("잔고 조회 실패: %w", err)
+					}
+					usdtBalance := balances["USDT"].Available
+
+					// TradeInfo 생성
 					tradeInfo := notification.TradeInfo{
-						Symbol:       s.Symbol,
-						PositionType: s.Type.String(),
-						Quantity:     quantity,
-						EntryPrice:   s.Price,
-						StopLoss:     s.StopLoss,
-						TakeProfit:   s.TakeProfit,
+						Symbol:        s.Symbol,
+						PositionType:  s.Type.String(),
+						PositionValue: positionValue,
+						EntryPrice:    s.Price,
+						StopLoss:      s.StopLoss,
+						TakeProfit:    s.TakeProfit,
+						Balance:       usdtBalance,
+						Leverage:      5,
 					}
 
 					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
@@ -194,18 +234,38 @@ func (c *Collector) Collect(ctx context.Context) error {
 	return nil
 }
 
-// calculateQuantity는 현재 잔고로 매수 가능한 수량을 계산합니다
-func (c *Collector) calculatequantity(balance float64, entryPrice float64, percentageToUse float64) float64 {
-	// 사용 가능한 잔고 계산
-	usableBalance := balance * (percentageToUse / 100)
+// calculatePositionValue는 수수료와 유지증거금을 고려하여 최대 포지션 크기를 계산합니다
+// 최대 포지션 크기 계산식
+// 최대 포지션 = 가용잔고 × 레버리지 / (1 + 유지증거금률 + 총수수료율)
+func (c *Collector) calculatePositionValue(
+	balance float64,
+	leverage int,
+	maintMargin float64,
+) float64 {
+	// 수수료율 (진입 + 청산)
+	totalFeeRate := 0.001 // 0.1%
 
-	// 수수료( 우선은 0.1%로 설정해놓음)
-	fee := 0.001
+	// 포지션 크기 계산
+	positionSize := (balance * float64(leverage)) / (1 + maintMargin + totalFeeRate)
 
-	// 매수 가능한 수량 = 사용 가능한 잔고 / (진입가 * (1+수수료료))
-	quantity := usableBalance / (entryPrice * (1 + fee))
+	return math.Floor(positionSize*100) / 100 // 소수점 2자리까지 내림
+}
 
-	return quantity
+// findBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
+func findBracket(brackets []LeverageBracket, leverage int) *LeverageBracket {
+	// 레버리지가 높은 순으로 정렬되어 있으므로,
+	// 설정된 레버리지보다 크거나 같은 첫 번째 브라켓을 찾습니다.
+	for i := len(brackets) - 1; i >= 0; i-- {
+		if brackets[i].InitialLeverage >= leverage {
+			return &brackets[i]
+		}
+	}
+
+	// 찾지 못한 경우 가장 낮은 레버리지 브라켓 반환
+	if len(brackets) > 0 {
+		return &brackets[0]
+	}
+	return nil
 }
 
 func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, string, float64, error) {
@@ -220,6 +280,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 
 	}
 
+	// 포지션 체크크
 	for _, pos := range positions {
 		if pos.Symbol == coinSignal.Symbol {
 			if coinSignal.Type == signal.Long && pos.PositionSide == "LONG" {
@@ -243,15 +304,54 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 		return false, "USDT 잔고가 없습니다", 0, nil
 	}
 
-	// 3. 매수 가능한 수령 계산 (우선 100% 사용)
-	// 이곳에서 현재가를 매수가처럼 사용했지만 실제 매매에서는 시장가로 살 것이기에 가격 조회 1회가 필요하다.
-	quantity := c.calculatequantity(usdtBalance.Available, coinSignal.Price, 100)
-
-	if quantity < 0.001 {
-		return false, fmt.Sprintf("잔고 부족 (필요: %.2f USDT, 보유: %.2f USDT)", coinSignal.Price*0.001, usdtBalance.Available), 0, nil
+	// 3. 레버리지 브라켓 정보 조회
+	brackets, err := c.client.GetLeverageBrackets(ctx, coinSignal.Symbol)
+	if err != nil {
+		return false, "", 0, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
 	}
 
-	return true, "", quantity, nil
+	// 해당 심볼의 브라켓 정보 찾기
+	var symbolBracket *SymbolBrackets
+	for _, b := range brackets {
+		if b.Symbol == coinSignal.Symbol {
+			symbolBracket = &b
+			break
+		}
+	}
+
+	if symbolBracket == nil || len(symbolBracket.Brackets) == 0 {
+		return false, "레버리지 브라켓 정보가 없습니다", 0, nil
+	}
+
+	// 설정된 레버리지에 맞는 브라켓 찾기
+	leverage := 5 // 레버리지 설정값
+	bracket := findBracket(symbolBracket.Brackets, leverage)
+	if bracket == nil {
+		return false, "적절한 레버리지 브라켓을 찾을 수 없습니다", 0, nil
+	}
+
+	// 브라켓 정보 로깅
+	log.Printf("선택된 브라켓: 레버리지 %dx, 유지증거금률 %.4f%%, 최대 포지션 %.2f USDT",
+		bracket.InitialLeverage,
+		bracket.MaintMarginRatio*100,
+		bracket.Notional)
+
+	if err := c.discord.SendInfo(fmt.Sprintf("```\n%s\n레버리지: %dx\n유지증거금률: %.4f%%\n최대 포지션: %.2f USDT\n```",
+		coinSignal.Symbol,
+		bracket.InitialLeverage,
+		bracket.MaintMarginRatio*100,
+		bracket.Notional)); err != nil {
+		log.Printf("브라켓 정보 알림 전송 실패: %v", err)
+	}
+
+	// 4. 포지션 크기 계산
+	positionValue := c.calculatePositionValue(
+		usdtBalance.Available,
+		leverage,
+		bracket.MaintMarginRatio,
+	)
+
+	return true, "", positionValue, nil
 }
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다

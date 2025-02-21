@@ -60,8 +60,14 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	embed := NewEmbed().
 		SetTitle(fmt.Sprintf("거래 실행: %s", info.Symbol)).
 		SetDescription(fmt.Sprintf(
-			"**포지션**: %s\n**수량**: %.8f\n**가격**: $%.2f\n**손절가**: $%.2f\n**목표가**: $%.2f",
-			info.PositionType, info.Quantity, info.EntryPrice, info.StopLoss, info.TakeProfit,
+			"**포지션**: %s\n**포지션 크기**: %.2f USDT\n**레버리지**: %dx\n**진입가**: $%.2f\n**손절가**: $%.2f\n**목표가**: $%.2f\n**현재 잔고**: %.2f USDT",
+			info.PositionType,
+			info.PositionValue,
+			info.Leverage,
+			info.EntryPrice,
+			info.StopLoss,
+			info.TakeProfit,
+			info.Balance,
 		)).
 		SetColor(notification.GetColorForPosition(info.PositionType)).
 		SetFooter("Assist by Trading Bot 🤖").

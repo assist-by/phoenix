@@ -412,6 +412,26 @@ func (c *Client) GetPositions(ctx context.Context) ([]PositionInfo, error) {
 	return activePositions, nil
 }
 
+// GetLeverageBrackets는 심볼의 레버리지 브라켓 정보를 조회합니다
+func (c *Client) GetLeverageBrackets(ctx context.Context, symbol string) ([]SymbolBrackets, error) {
+	params := url.Values{}
+	if symbol != "" {
+		params.Add("symbol", symbol)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/leverageBracket", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+	}
+
+	var brackets []SymbolBrackets
+	if err := json.Unmarshal(resp, &brackets); err != nil {
+		return nil, fmt.Errorf("레버리지 브라켓 데이터 파싱 실패: %w", err)
+	}
+
+	return brackets, nil
+}
+
 // =================================
 // 시간 관련된 함수
 

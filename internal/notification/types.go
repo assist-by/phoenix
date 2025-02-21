@@ -37,12 +37,14 @@ type Notifier interface {
 
 // TradeInfo는 거래 실행 정보를 정의합니다
 type TradeInfo struct {
-	Symbol       string
-	PositionType string // "LONG" or "SHORT"
-	Quantity     float64
-	EntryPrice   float64
-	StopLoss     float64
-	TakeProfit   float64
+	Symbol        string
+	PositionType  string // "LONG" or "SHORT"
+	PositionValue float64
+	EntryPrice    float64
+	StopLoss      float64
+	TakeProfit    float64
+	Balance       float64 // 현재 USDT 잔고
+	Leverage      int     // 사용 레버리지
 }
 
 // getColorForPosition은 포지션 타입에 따른 색상을 반환합니다
