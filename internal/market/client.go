@@ -240,23 +240,49 @@ func (c *Client) GetBalance(ctx context.Context) (map[string]Balance, error) {
 }
 
 // PlaceOrder는 새로운 주문을 생성합니다
+// PlaceOrder는 새로운 주문을 생성합니다
 func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
 	params := url.Values{}
 	params.Add("symbol", order.Symbol)
 	params.Add("side", string(order.Side))
-	params.Add("type", string(order.Type))
-	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
-	params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-	params.Add("stopLimitPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-	params.Add("price", strconv.FormatFloat(order.TakeProfit, 'f', -1, 64))
 
 	if order.PositionSide != "" {
 		params.Add("positionSide", string(order.PositionSide))
 	}
 
-	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order/oco", params, true)
+	var endpoint string = "/fapi/v1/order"
+
+	switch order.Type {
+	case Market:
+		params.Add("type", "MARKET")
+		if order.QuoteOrderQty > 0 {
+			// USDT 금액으로 주문 (추가된 부분)
+			params.Add("quoteOrderQty", strconv.FormatFloat(order.QuoteOrderQty, 'f', -1, 64))
+		} else {
+			// 기존 방식 (코인 수량으로 주문)
+			params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		}
+
+	case Limit:
+		params.Add("type", "LIMIT")
+		params.Add("timeInForce", "GTC")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("price", strconv.FormatFloat(order.Price, 'f', -1, 64))
+
+	case StopMarket:
+		params.Add("type", "STOP_MARKET")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+
+	case TakeProfitMarket:
+		params.Add("type", "TAKE_PROFIT_MARKET")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodPost, endpoint, params, true)
 	if err != nil {
-		return nil, fmt.Errorf("OCO 주문 실행 실패: %w", err)
+		return nil, fmt.Errorf("주문 실행 실패: %w", err)
 	}
 
 	var result OrderResponse
@@ -266,6 +292,33 @@ func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResp
 
 	return &result, nil
 }
+
+// func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
+// 	params := url.Values{}
+// 	params.Add("symbol", order.Symbol)
+// 	params.Add("side", string(order.Side))
+// 	params.Add("type", string(order.Type))
+// 	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+// 	params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+// 	params.Add("stopLimitPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+// 	params.Add("price", strconv.FormatFloat(order.TakeProfit, 'f', -1, 64))
+
+// 	if order.PositionSide != "" {
+// 		params.Add("positionSide", string(order.PositionSide))
+// 	}
+
+// 	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order/oco", params, true)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("OCO 주문 실행 실패: %w", err)
+// 	}
+
+// 	var result OrderResponse
+// 	if err := json.Unmarshal(resp, &result); err != nil {
+// 		return nil, fmt.Errorf("주문 응답 파싱 실패: %w", err)
+// 	}
+
+// 	return &result, nil
+// }
 
 // // PlaceTPSLOrder는 손절/익절 주문을 생성합니다
 // func (c *Client) PlaceTPSLOrder(ctx context.Context, mainOrder *OrderResponse, stopLoss, takeProfit float64) error {

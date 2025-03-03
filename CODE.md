@@ -1536,23 +1536,49 @@ func (c *Client) GetBalance(ctx context.Context) (map[string]Balance, error) {
 }
 
 // PlaceOrder는 새로운 주문을 생성합니다
+// PlaceOrder는 새로운 주문을 생성합니다
 func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
 	params := url.Values{}
 	params.Add("symbol", order.Symbol)
 	params.Add("side", string(order.Side))
-	params.Add("type", string(order.Type))
-	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
-	params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-	params.Add("stopLimitPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-	params.Add("price", strconv.FormatFloat(order.TakeProfit, 'f', -1, 64))
 
 	if order.PositionSide != "" {
 		params.Add("positionSide", string(order.PositionSide))
 	}
 
-	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order/oco", params, true)
+	var endpoint string = "/fapi/v1/order"
+
+	switch order.Type {
+	case Market:
+		params.Add("type", "MARKET")
+		if order.QuoteOrderQty > 0 {
+			// USDT 금액으로 주문 (추가된 부분)
+			params.Add("quoteOrderQty", strconv.FormatFloat(order.QuoteOrderQty, 'f', -1, 64))
+		} else {
+			// 기존 방식 (코인 수량으로 주문)
+			params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		}
+
+	case Limit:
+		params.Add("type", "LIMIT")
+		params.Add("timeInForce", "GTC")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("price", strconv.FormatFloat(order.Price, 'f', -1, 64))
+
+	case StopMarket:
+		params.Add("type", "STOP_MARKET")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+
+	case TakeProfitMarket:
+		params.Add("type", "TAKE_PROFIT_MARKET")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodPost, endpoint, params, true)
 	if err != nil {
-		return nil, fmt.Errorf("OCO 주문 실행 실패: %w", err)
+		return nil, fmt.Errorf("주문 실행 실패: %w", err)
 	}
 
 	var result OrderResponse
@@ -1562,6 +1588,33 @@ func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResp
 
 	return &result, nil
 }
+
+// func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
+// 	params := url.Values{}
+// 	params.Add("symbol", order.Symbol)
+// 	params.Add("side", string(order.Side))
+// 	params.Add("type", string(order.Type))
+// 	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+// 	params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+// 	params.Add("stopLimitPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+// 	params.Add("price", strconv.FormatFloat(order.TakeProfit, 'f', -1, 64))
+
+// 	if order.PositionSide != "" {
+// 		params.Add("positionSide", string(order.PositionSide))
+// 	}
+
+// 	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order/oco", params, true)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("OCO 주문 실행 실패: %w", err)
+// 	}
+
+// 	var result OrderResponse
+// 	if err := json.Unmarshal(resp, &result); err != nil {
+// 		return nil, fmt.Errorf("주문 응답 파싱 실패: %w", err)
+// 	}
+
+// 	return &result, nil
+// }
 
 // // PlaceTPSLOrder는 손절/익절 주문을 생성합니다
 // func (c *Client) PlaceTPSLOrder(ctx context.Context, mainOrder *OrderResponse, stopLoss, takeProfit float64) error {
@@ -1879,36 +1932,6 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
-
-			brackets, err := c.client.GetLeverageBrackets(ctx, symbol)
-			if err != nil {
-				return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
-			}
-
-			var symbolBracket *SymbolBrackets
-			for _, b := range brackets {
-				if b.Symbol == symbol {
-					symbolBracket = &b
-					break
-				}
-			}
-
-			if symbolBracket != nil && len(symbolBracket.Brackets) > 0 {
-				info := fmt.Sprintf("%s 유지증거금 정보:\n```", symbol)
-				for _, bracket := range symbolBracket.Brackets {
-					info += fmt.Sprintf("\n구간 %d: 최대레버리지 %dx, 유지증거금율 %.4f%%, 최대 포지션 %.2f USDT",
-						bracket.Bracket,
-						bracket.InitialLeverage,
-						bracket.MaintMarginRatio*100,
-						bracket.Notional)
-				}
-				info += "```"
-
-				if err := c.discord.SendInfo(info); err != nil {
-					log.Printf("유지증거금 정보 알림 전송 실패: %v", err)
-				}
-			}
-
 			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
 			if err != nil {
 				return err
@@ -1945,45 +1968,53 @@ func (c *Collector) Collect(ctx context.Context) error {
 				}
 
 				if s.Type != signal.NoSignal {
-					// 진입 가능 여부 확인
-					available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
-					if err != nil {
-						log.Printf("진입 가능 여부 확인 실패: %v", err)
-						if err := c.discord.SendError(err); err != nil {
-							log.Printf("에러 알림 전송 실패: %v", err)
-						}
-
+					// 매매 실행
+					if err := c.executeSignalTrade(ctx, s); err != nil {
+						c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
+					} else {
+						log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
+							s.Symbol, s.Type.String())
 					}
 
-					if !available {
-						log.Printf("진입 불가: %s", reason)
+					// // 진입 가능 여부 확인
+					// available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+					// if err != nil {
+					// 	log.Printf("진입 가능 여부 확인 실패: %v", err)
+					// 	if err := c.discord.SendError(err); err != nil {
+					// 		log.Printf("에러 알림 전송 실패: %v", err)
+					// 	}
 
-					}
+					// }
 
-					balances, err := c.client.GetBalance(ctx)
-					if err != nil {
-						return fmt.Errorf("잔고 조회 실패: %w", err)
-					}
-					usdtBalance := balances["USDT"].Available
+					// if !available {
+					// 	log.Printf("진입 불가: %s", reason)
 
-					// TradeInfo 생성
-					tradeInfo := notification.TradeInfo{
-						Symbol:        s.Symbol,
-						PositionType:  s.Type.String(),
-						PositionValue: positionValue,
-						EntryPrice:    s.Price,
-						StopLoss:      s.StopLoss,
-						TakeProfit:    s.TakeProfit,
-						Balance:       usdtBalance,
-						Leverage:      5,
-					}
+					// }
 
-					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
-						log.Printf("거래 정보 알림 전송 실패: %v", err)
-						if err := c.discord.SendError(err); err != nil {
-							log.Printf("에러 알림 전송 실패: %v", err)
-						}
-					}
+					// balances, err := c.client.GetBalance(ctx)
+					// if err != nil {
+					// 	return fmt.Errorf("잔고 조회 실패: %w", err)
+					// }
+					// usdtBalance := balances["USDT"].Available
+
+					// // TradeInfo 생성
+					// tradeInfo := notification.TradeInfo{
+					// 	Symbol:        s.Symbol,
+					// 	PositionType:  s.Type.String(),
+					// 	PositionValue: positionValue,
+					// 	EntryPrice:    s.Price,
+					// 	StopLoss:      s.StopLoss,
+					// 	TakeProfit:    s.TakeProfit,
+					// 	Balance:       usdtBalance,
+					// 	Leverage:      5,
+					// }
+
+					// if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+					// 	log.Printf("거래 정보 알림 전송 실패: %v", err)
+					// 	if err := c.discord.SendError(err); err != nil {
+					// 		log.Printf("에러 알림 전송 실패: %v", err)
+					// 	}
+					// }
 				}
 			}
 
@@ -2044,7 +2075,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 
 	}
 
-	// 포지션 체크크
+	// 포지션 체크
 	for _, pos := range positions {
 		if pos.Symbol == coinSignal.Symbol {
 			if coinSignal.Type == signal.Long && pos.PositionSide == "LONG" {
@@ -2105,7 +2136,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 		bracket.InitialLeverage,
 		bracket.MaintMarginRatio*100,
 		bracket.Notional)); err != nil {
-		log.Printf("브라켓 정보 알림 전송 실패: %v", err)
+		c.discord.SendError(err)
 	}
 
 	// 4. 포지션 크기 계산
@@ -2116,6 +2147,175 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	)
 
 	return true, "", positionValue, nil
+}
+
+// executeSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
+func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) error {
+	if s.Type == signal.NoSignal {
+		return nil // 시그널이 없으면 아무것도 하지 않음
+	}
+
+	// 1. 진입 가능 여부 확인
+	available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+	if err != nil {
+		return fmt.Errorf("진입 가능 여부 확인 실패: %w", err)
+	}
+
+	// 2. 진입 불가능한 경우 종료
+	if !available {
+		return fmt.Errorf("진입 불가: %s", reason)
+	}
+
+	// 3. HEDGE 모드 설정
+	if err := c.client.SetPositionMode(ctx, true); err != nil {
+		return fmt.Errorf("HEDGE 모드 설정 실패: %w", err)
+	}
+
+	// 4. 레버리지 설정 (기본값 5로 가정)
+	leverage := 5 // 설정에서 가져오는 것으로 변경 가능
+	if err := c.client.SetLeverage(ctx, s.Symbol, leverage); err != nil {
+		return fmt.Errorf("레버리지 설정 실패: %w", err)
+	}
+
+	// 5. 주문 수량 계산 (필요시)
+	quantity := positionValue / s.Price
+	// 수량 반올림 (거래소별 최소 단위에 맞게 조정 필요)
+	quantity = math.Floor(quantity*1000) / 1000
+
+	// 6. 진입 주문 생성
+	orderSide := Buy
+	positionSide := Long
+	if s.Type == signal.Short {
+		orderSide = Sell
+		positionSide = Short
+	}
+
+	// 7. 진입 주문 실행
+	entryOrder := OrderRequest{
+		Symbol:       s.Symbol,
+		Side:         orderSide,
+		PositionSide: positionSide,
+		Type:         Market,
+		Quantity:     quantity,
+	}
+
+	mainOrder, err := c.client.PlaceOrder(ctx, entryOrder)
+	if err != nil {
+		return fmt.Errorf("주문 실행 실패: %w", err)
+	}
+
+	// 잔고 조회하여 TradeInfo에 추가
+	balances, err := c.client.GetBalance(ctx)
+	if err != nil {
+		log.Printf("잔고 조회 실패: %v", err)
+		// 잔고 조회 실패해도 진행
+	}
+
+	// USDT 잔고 가져오기
+	usdtBalance := 0.0
+	if balance, exists := balances["USDT"]; exists {
+		usdtBalance = balance.Available
+	}
+
+	// TradeInfo 생성 및 전송
+	tradeInfo := notification.TradeInfo{
+		Symbol:        s.Symbol,
+		PositionType:  s.Type.String(),
+		PositionValue: positionValue,
+		EntryPrice:    s.Price,
+		StopLoss:      s.StopLoss,
+		TakeProfit:    s.TakeProfit,
+		Balance:       usdtBalance,
+		Leverage:      leverage,
+	}
+
+	if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+		log.Printf("거래 정보 알림 전송 실패: %v", err)
+	}
+
+	// 8. TP/SL 주문 실행
+	if err := c.placeTPSLOrders(ctx, s, mainOrder.ExecutedQuantity); err != nil {
+		// TP/SL 설정 실패 알림
+		errMsg := fmt.Errorf("⚠️ TP/SL 주문 설정 실패: %w", err)
+		log.Printf("%v", errMsg)
+		if err := c.discord.SendError(errMsg); err != nil {
+			log.Printf("에러 알림 전송 실패: %v", err)
+		}
+		// TP/SL 실패해도 메인 주문은 이미 실행되었으므로 계속 진행
+	}
+
+	return nil
+}
+
+// placeTPSLOrders는 TP(Take Profit)와 SL(Stop Loss) 주문을 설정합니다
+func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quantity float64) error {
+	// 주문의 반대 사이드 계산
+	oppositeSide := Sell
+	if s.Type == signal.Short {
+		oppositeSide = Buy
+	}
+
+	// 포지션 사이드
+	positionSide := Long
+	if s.Type == signal.Short {
+		positionSide = Short
+	}
+
+	// 손절(SL) 주문 생성
+	slOrder := OrderRequest{
+		Symbol:       s.Symbol,
+		Side:         oppositeSide,
+		PositionSide: positionSide,
+		Type:         StopMarket, // 스탑 마켓 주문
+		Quantity:     quantity,
+		StopPrice:    s.StopLoss, // 손절가
+	}
+
+	// 손절 주문 실행
+	_, err := c.client.PlaceOrder(ctx, slOrder)
+	if err != nil {
+		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
+	}
+
+	// 익절(TP) 주문 생성
+	tpOrder := OrderRequest{
+		Symbol:       s.Symbol,
+		Side:         oppositeSide,
+		PositionSide: positionSide,
+		Type:         TakeProfitMarket, // 익절 마켓 주문
+		Quantity:     quantity,
+		StopPrice:    s.TakeProfit, // 익절가
+	}
+
+	// 익절 주문 실행
+	_, err = c.client.PlaceOrder(ctx, tpOrder)
+	if err != nil {
+		return fmt.Errorf("익절(TP) 주문 실패: %w", err)
+	}
+
+	// TP/SL 설정 성공 알림
+	tpslMsg := fmt.Sprintf("✅ %s TP/SL 설정 성공\n심볼: %s\n손절가: %.2f (%.2f%%)\n목표가: %.2f (%.2f%%)",
+		s.Type.String(),
+		s.Symbol,
+		s.StopLoss,
+		calculatePctDiff(s.Price, s.StopLoss, s.Type == signal.Short),
+		s.TakeProfit,
+		calculatePctDiff(s.Price, s.TakeProfit, s.Type != signal.Short))
+
+	if err := c.discord.SendInfo(tpslMsg); err != nil {
+		c.discord.SendError(fmt.Errorf("알림 전송 실패: %v", err))
+	}
+
+	return nil
+}
+
+// calculatePctDiff는 두 가격 간의 백분율 차이를 계산합니다
+func calculatePctDiff(base, target float64, isGain bool) float64 {
+	diff := (target - base) / base * 100
+	if isGain {
+		return diff // 양수 값 (이익)
+	}
+	return -diff // 음수 값 (손실)
 }
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다
@@ -2195,6 +2395,11 @@ func (c *Collector) withRetry(ctx context.Context, operation string, fn func() e
 	return lastErr
 }
 
+// formatUSDT는 USDT 금액을 포맷팅합니다
+func formatUSDT(amount float64) string {
+	return fmt.Sprintf("%.2f USDT", amount)
+}
+
 ```
 ## internal/market/types.go
 ```go
@@ -2259,19 +2464,22 @@ const (
 	Market  OrderType = "MARKET"
 	Limit   OrderType = "LIMIT"
 	StopOCO OrderType = "STOP_OCO"
+
+	StopMarket       OrderType = "STOP_MARKET"
+	TakeProfitMarket OrderType = "TAKE_PROFIT_MARKET"
 )
 
 // OrderRequest는 주문 요청 정보를 표현합니다
-
 type OrderRequest struct {
-	Symbol       string
-	Side         OrderSide
-	PositionSide PositionSide
-	Type         OrderType
-	Quantity     float64
-	Price        float64 // 진입가격
-	StopPrice    float64 // 손절가격
-	TakeProfit   float64 // 익절가격
+	Symbol        string
+	Side          OrderSide
+	PositionSide  PositionSide
+	Type          OrderType
+	Quantity      float64 // 코인 개수
+	QuoteOrderQty float64 // USDT 가치 (추가됨)
+	Price         float64 // 진입가격 (리밋 주문)
+	StopPrice     float64 // 손절가격
+	TakeProfit    float64 // 익절가격
 }
 
 // OrderResponse는 주문 응답을 표현합니다

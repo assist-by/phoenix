@@ -59,19 +59,22 @@ const (
 	Market  OrderType = "MARKET"
 	Limit   OrderType = "LIMIT"
 	StopOCO OrderType = "STOP_OCO"
+
+	StopMarket       OrderType = "STOP_MARKET"
+	TakeProfitMarket OrderType = "TAKE_PROFIT_MARKET"
 )
 
 // OrderRequest는 주문 요청 정보를 표현합니다
-
 type OrderRequest struct {
-	Symbol       string
-	Side         OrderSide
-	PositionSide PositionSide
-	Type         OrderType
-	Quantity     float64
-	Price        float64 // 진입가격
-	StopPrice    float64 // 손절가격
-	TakeProfit   float64 // 익절가격
+	Symbol        string
+	Side          OrderSide
+	PositionSide  PositionSide
+	Type          OrderType
+	Quantity      float64 // 코인 개수
+	QuoteOrderQty float64 // USDT 가치 (추가됨)
+	Price         float64 // 진입가격 (리밋 주문)
+	StopPrice     float64 // 손절가격
+	TakeProfit    float64 // 익절가격
 }
 
 // OrderResponse는 주문 응답을 표현합니다
