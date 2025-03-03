@@ -129,3 +129,9 @@ type SymbolInfo struct {
 	PricePrecision    int     // 가격 소수점 자릿수
 	QuantityPrecision int     // 수량 소수점 자릿수
 }
+
+// PositionSizeResult는 포지션 계산 결과를 담는 구조체입니다
+type PositionSizeResult struct {
+	PositionValue float64 // 포지션 크기 (USDT)
+	Quantity      float64 // 구매 수량 (코인)
+}

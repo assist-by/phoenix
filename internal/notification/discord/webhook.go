@@ -2,6 +2,7 @@ package discord
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/assist-by/phoenix/internal/notification"
@@ -60,8 +61,10 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	embed := NewEmbed().
 		SetTitle(fmt.Sprintf("거래 실행: %s", info.Symbol)).
 		SetDescription(fmt.Sprintf(
-			"**포지션**: %s\n**포지션 크기**: %.2f USDT\n**레버리지**: %dx\n**진입가**: $%.2f\n**손절가**: $%.2f\n**목표가**: $%.2f\n**현재 잔고**: %.2f USDT",
+			"**포지션**: %s\n**수량**: %.8f %s\n**포지션 크기**: %.2f USDT\n**레버리지**: %dx\n**진입가**: $%.2f\n**손절가**: $%.2f\n**목표가**: $%.2f\n**현재 잔고**: %.2f USDT",
 			info.PositionType,
+			info.Quantity,
+			strings.TrimSuffix(info.Symbol, "USDT"), // BTCUSDT에서 BTC만 추출
 			info.PositionValue,
 			info.Leverage,
 			info.EntryPrice,

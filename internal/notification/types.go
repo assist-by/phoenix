@@ -37,12 +37,13 @@ type Notifier interface {
 
 // TradeInfo는 거래 실행 정보를 정의합니다
 type TradeInfo struct {
-	Symbol        string
-	PositionType  string // "LONG" or "SHORT"
-	PositionValue float64
-	EntryPrice    float64
-	StopLoss      float64
-	TakeProfit    float64
+	Symbol        string  // 심볼 (예: BTCUSDT)
+	PositionType  string  // "LONG" or "SHORT"
+	PositionValue float64 // 포지션 크기 (USDT)
+	Quantity      float64 // 구매/판매 수량 (코인)
+	EntryPrice    float64 // 진입가
+	StopLoss      float64 // 손절가
+	TakeProfit    float64 // 익절가
 	Balance       float64 // 현재 USDT 잔고
 	Leverage      int     // 사용 레버리지
 }

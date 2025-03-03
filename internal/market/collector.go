@@ -160,7 +160,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 					// }
 
 					// 진입 가능 여부 확인
-					available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+					available, reason, positionValue, quantity, err := c.checkEntryAvailable(ctx, s)
 					if err != nil {
 						log.Printf("진입 가능 여부 확인 실패: %v", err)
 						if err := c.discord.SendError(err); err != nil {
@@ -185,6 +185,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 						Symbol:        s.Symbol,
 						PositionType:  s.Type.String(),
 						PositionValue: positionValue,
+						Quantity:      quantity,
 						EntryPrice:    s.Price,
 						StopLoss:      s.StopLoss,
 						TakeProfit:    s.TakeProfit,
@@ -229,7 +230,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 // 	return math.Floor(positionSize*100) / 100 // 소수점 2자리까지 내림
 // }
 
-// calculatePositionValue는 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기를 계산합니다
+// calculatePosition은 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기와 수량을 계산합니다
 // 단계별 계산:
 // 1. 이론적 최대 포지션 = 가용잔고 × 레버리지
 // 2. 이론적 최대 수량 = 이론적 최대 포지션 ÷ 코인 가격
@@ -242,7 +243,7 @@ func (c *Collector) calculatePositionValue(
 	coinPrice float64, // 코인 현재 가격
 	stepSize float64, // 코인 최소 주문 단위
 	maintMargin float64, // 유지증거금률
-) float64 {
+) PositionSizeResult {
 	// 1. 이론적 최대 포지션 계산
 	theoreticalMaxPosition := balance * float64(leverage)
 
@@ -261,7 +262,10 @@ func (c *Collector) calculatePositionValue(
 	finalPositionValue := actualPositionValue / (1 + maintMargin + totalFeeRate)
 
 	// 소수점 2자리까지 내림
-	return math.Floor(finalPositionValue*100) / 100
+	return PositionSizeResult{
+		PositionValue: math.Floor(finalPositionValue*100) / 100,
+		Quantity:      adjustedQuantity,
+	}
 }
 
 // findBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
@@ -281,14 +285,14 @@ func findBracket(brackets []LeverageBracket, leverage int) *LeverageBracket {
 	return nil
 }
 
-func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, string, float64, error) {
+func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, string, float64, float64, error) {
 	// 1. 현재 포지션 조회
 	positions, err := c.client.GetPositions(ctx)
 	if err != nil {
 		if len(positions) == 0 {
 			log.Printf("활성 포지션 없음: %s", coinSignal.Symbol)
 		} else {
-			return false, "", 0, err
+			return false, "", 0, 0, err
 		}
 
 	}
@@ -297,10 +301,10 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	for _, pos := range positions {
 		if pos.Symbol == coinSignal.Symbol {
 			if coinSignal.Type == signal.Long && pos.PositionSide == "LONG" {
-				return false, "이미 롱 포지션이 있습니다", 0, nil
+				return false, "이미 롱 포지션이 있습니다", 0, 0, nil
 			}
 			if coinSignal.Type == signal.Short && pos.PositionSide == "SHORT" {
-				return false, "이미 숏 포지션이 있습니다", 0, nil
+				return false, "이미 숏 포지션이 있습니다", 0, 0, nil
 			}
 		}
 	}
@@ -308,25 +312,25 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	// 2. 잔고 조회
 	balances, err := c.client.GetBalance(ctx)
 	if err != nil {
-		return false, "", 0, fmt.Errorf("잔고 조회 실패: %w", err)
+		return false, "", 0, 0, fmt.Errorf("잔고 조회 실패: %w", err)
 	}
 
 	// USDT 잔고 확인
 	usdtBalance, exists := balances["USDT"]
 	if !exists {
-		return false, "USDT 잔고가 없습니다", 0, nil
+		return false, "USDT 잔고가 없습니다", 0, 0, nil
 	}
 
 	// 3. 심볼 정보 조회
 	symbolInfo, err := c.client.GetSymbolInfo(ctx, coinSignal.Symbol)
 	if err != nil {
-		return false, "", 0, fmt.Errorf("심볼 정보 조회 실패: %w", err)
+		return false, "", 0, 0, fmt.Errorf("심볼 정보 조회 실패: %w", err)
 	}
 
 	// 4. 레버리지 브라켓 정보 조회
 	brackets, err := c.client.GetLeverageBrackets(ctx, coinSignal.Symbol)
 	if err != nil {
-		return false, "", 0, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+		return false, "", 0, 0, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
 	}
 
 	// 해당 심볼의 브라켓 정보 찾기
@@ -339,14 +343,14 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	}
 
 	if symbolBracket == nil || len(symbolBracket.Brackets) == 0 {
-		return false, "레버리지 브라켓 정보가 없습니다", 0, nil
+		return false, "레버리지 브라켓 정보가 없습니다", 0, 0, nil
 	}
 
 	// 설정된 레버리지에 맞는 브라켓 찾기
 	leverage := 5 // 레버리지 설정값
 	bracket := findBracket(symbolBracket.Brackets, leverage)
 	if bracket == nil {
-		return false, "적절한 레버리지 브라켓을 찾을 수 없습니다", 0, nil
+		return false, "적절한 레버리지 브라켓을 찾을 수 없습니다", 0, 0, nil
 	}
 
 	// 브라켓 정보 로깅
@@ -364,7 +368,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	}
 
 	// 5. 포지션 크기 계산
-	positionValue := c.calculatePositionValue(
+	positionResult := c.calculatePositionValue(
 		usdtBalance.Available,
 		leverage,
 		coinSignal.Price,
@@ -372,7 +376,12 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 		bracket.MaintMarginRatio,
 	)
 
-	return true, "", positionValue, nil
+	// 최소 주문 가치 체크
+	if positionResult.PositionValue < symbolInfo.MinNotional {
+		return false, fmt.Sprintf("포지션 크기가 최소 주문 가치(%.2f USDT)보다 작습니다", symbolInfo.MinNotional), 0, 0, nil
+	}
+
+	return true, "", positionResult.PositionValue, positionResult.Quantity, nil
 }
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
@@ -382,8 +391,8 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		return nil // 시그널이 없으면 아무것도 하지 않음
 	}
 
-	// 1. 진입 가능 여부 확인
-	available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+	// 1. 진입 가능 여부 확인 _ > quantity
+	available, reason, positionValue, _, err := c.checkEntryAvailable(ctx, s)
 	if err != nil {
 		return fmt.Errorf("진입 가능 여부 확인 실패: %w", err)
 	}
