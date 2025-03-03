@@ -160,7 +160,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 					// }
 
 					// 진입 가능 여부 확인
-					available, reason, positionValue, quantity, err := c.checkEntryAvailable(ctx, s)
+					result, err := c.checkEntryAvailable(ctx, s)
 					if err != nil {
 						log.Printf("진입 가능 여부 확인 실패: %v", err)
 						if err := c.discord.SendError(err); err != nil {
@@ -169,8 +169,8 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 					}
 
-					if !available {
-						log.Printf("진입 불가: %s", reason)
+					if !result.Available {
+						log.Printf("진입 불가: %s", result.Reason)
 
 					}
 
@@ -184,8 +184,8 @@ func (c *Collector) Collect(ctx context.Context) error {
 					tradeInfo := notification.TradeInfo{
 						Symbol:        s.Symbol,
 						PositionType:  s.Type.String(),
-						PositionValue: positionValue,
-						Quantity:      quantity,
+						PositionValue: result.PositionValue,
+						Quantity:      result.Quantity,
 						EntryPrice:    s.Price,
 						StopLoss:      s.StopLoss,
 						TakeProfit:    s.TakeProfit,
@@ -237,7 +237,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 // 3. 실제 수량 = 이론적 최대 수량을 최소 주문 단위로 내림
 // 4. 실제 포지션 가치 = 실제 수량 × 코인 가격
 // 5. 수수료 및 마진 고려해 최종 조정
-func (c *Collector) calculatePositionValue(
+func (c *Collector) calculatePosition(
 	balance float64, // 가용 잔고
 	leverage int, // 레버리지
 	coinPrice float64, // 코인 현재 가격
@@ -285,14 +285,18 @@ func findBracket(brackets []LeverageBracket, leverage int) *LeverageBracket {
 	return nil
 }
 
-func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, string, float64, float64, error) {
+func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (EntryCheckResult, error) {
+	result := EntryCheckResult{
+		Available: false,
+	}
+
 	// 1. 현재 포지션 조회
 	positions, err := c.client.GetPositions(ctx)
 	if err != nil {
 		if len(positions) == 0 {
 			log.Printf("활성 포지션 없음: %s", coinSignal.Symbol)
 		} else {
-			return false, "", 0, 0, err
+			return result, err
 		}
 
 	}
@@ -301,10 +305,12 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	for _, pos := range positions {
 		if pos.Symbol == coinSignal.Symbol {
 			if coinSignal.Type == signal.Long && pos.PositionSide == "LONG" {
-				return false, "이미 롱 포지션이 있습니다", 0, 0, nil
+				result.Reason = "이미 롱 포지션이 있습니다"
+				return result, nil
 			}
 			if coinSignal.Type == signal.Short && pos.PositionSide == "SHORT" {
-				return false, "이미 숏 포지션이 있습니다", 0, 0, nil
+				result.Reason = "이미 숏 포지션이 있습니다"
+				return result, nil
 			}
 		}
 	}
@@ -312,25 +318,26 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	// 2. 잔고 조회
 	balances, err := c.client.GetBalance(ctx)
 	if err != nil {
-		return false, "", 0, 0, fmt.Errorf("잔고 조회 실패: %w", err)
+		return result, fmt.Errorf("잔고 조회 실패: %w", err)
 	}
 
 	// USDT 잔고 확인
 	usdtBalance, exists := balances["USDT"]
 	if !exists {
-		return false, "USDT 잔고가 없습니다", 0, 0, nil
+		result.Reason = "USDT 잔고가 부족합니다"
+		return result, nil
 	}
 
 	// 3. 심볼 정보 조회
 	symbolInfo, err := c.client.GetSymbolInfo(ctx, coinSignal.Symbol)
 	if err != nil {
-		return false, "", 0, 0, fmt.Errorf("심볼 정보 조회 실패: %w", err)
+		return result, fmt.Errorf("심볼 정보 조회 실패: %w", err)
 	}
 
 	// 4. 레버리지 브라켓 정보 조회
 	brackets, err := c.client.GetLeverageBrackets(ctx, coinSignal.Symbol)
 	if err != nil {
-		return false, "", 0, 0, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+		return result, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
 	}
 
 	// 해당 심볼의 브라켓 정보 찾기
@@ -343,14 +350,16 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	}
 
 	if symbolBracket == nil || len(symbolBracket.Brackets) == 0 {
-		return false, "레버리지 브라켓 정보가 없습니다", 0, 0, nil
+		result.Reason = "레버리지 브라켓 정보가 없습니다"
+		return result, nil
 	}
 
 	// 설정된 레버리지에 맞는 브라켓 찾기
 	leverage := 5 // 레버리지 설정값
 	bracket := findBracket(symbolBracket.Brackets, leverage)
 	if bracket == nil {
-		return false, "적절한 레버리지 브라켓을 찾을 수 없습니다", 0, 0, nil
+		result.Reason = "적절한 레버리지 브라켓을 찾을 수 없습니다"
+		return result, nil
 	}
 
 	// 브라켓 정보 로깅
@@ -368,7 +377,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	}
 
 	// 5. 포지션 크기 계산
-	positionResult := c.calculatePositionValue(
+	positionResult := c.calculatePosition(
 		usdtBalance.Available,
 		leverage,
 		coinSignal.Price,
@@ -378,10 +387,16 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 
 	// 최소 주문 가치 체크
 	if positionResult.PositionValue < symbolInfo.MinNotional {
-		return false, fmt.Sprintf("포지션 크기가 최소 주문 가치(%.2f USDT)보다 작습니다", symbolInfo.MinNotional), 0, 0, nil
+		result.Reason = fmt.Sprintf("포지션 크기가 최소 주문 가치(%.2f USDT)보다 작습니다", symbolInfo.MinNotional)
+		return result, nil
 	}
 
-	return true, "", positionResult.PositionValue, positionResult.Quantity, nil
+	// 모든 검사 통과
+	result.Available = true
+	result.PositionValue = positionResult.PositionValue
+	result.Quantity = positionResult.Quantity
+
+	return result, nil
 }
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
@@ -392,14 +407,14 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	}
 
 	// 1. 진입 가능 여부 확인 _ > quantity
-	available, reason, positionValue, _, err := c.checkEntryAvailable(ctx, s)
+	result, err := c.checkEntryAvailable(ctx, s)
 	if err != nil {
 		return fmt.Errorf("진입 가능 여부 확인 실패: %w", err)
 	}
 
 	// 2. 진입 불가능한 경우 종료
-	if !available {
-		return fmt.Errorf("진입 불가: %s", reason)
+	if !result.Available {
+		return fmt.Errorf("진입 불가: %s", result.Reason)
 	}
 
 	// 3. HEDGE 모드 설정
@@ -414,7 +429,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	}
 
 	// 5. 주문 수량 계산 (필요시)
-	quantity := positionValue / s.Price
+	quantity := result.PositionValue / s.Price
 	// 수량 반올림 (거래소별 최소 단위에 맞게 조정 필요)
 	quantity = math.Floor(quantity*1000) / 1000
 
@@ -457,7 +472,8 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	tradeInfo := notification.TradeInfo{
 		Symbol:        s.Symbol,
 		PositionType:  s.Type.String(),
-		PositionValue: positionValue,
+		PositionValue: result.PositionValue,
+		Quantity:      result.Quantity,
 		EntryPrice:    s.Price,
 		StopLoss:      s.StopLoss,
 		TakeProfit:    s.TakeProfit,

@@ -135,3 +135,11 @@ type PositionSizeResult struct {
 	PositionValue float64 // 포지션 크기 (USDT)
 	Quantity      float64 // 구매 수량 (코인)
 }
+
+// EntryCheckResult는 진입 가능 여부 확인 결과를 담는 구조체입니다
+type EntryCheckResult struct {
+	Available     bool    // 진입 가능 여부
+	Reason        string  // 불가능한 경우 이유
+	PositionValue float64 // 포지션 크기 (USDT)
+	Quantity      float64 // 구매/판매 수량 (코인)
+}
