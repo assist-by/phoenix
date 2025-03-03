@@ -119,3 +119,13 @@ type SymbolBrackets struct {
 	Symbol   string            `json:"symbol"`
 	Brackets []LeverageBracket `json:"brackets"`
 }
+
+// SymbolInfo는 심볼의 거래 정보를 나타냅니다
+type SymbolInfo struct {
+	Symbol            string  // 심볼 이름 (예: BTCUSDT)
+	StepSize          float64 // 수량 최소 단위 (예: 0.001 BTC)
+	TickSize          float64 // 가격 최소 단위 (예: 0.01 USDT)
+	MinNotional       float64 // 최소 주문 가치 (예: 10 USDT)
+	PricePrecision    int     // 가격 소수점 자릿수
+	QuantityPrecision int     // 수량 소수점 자릿수
+}

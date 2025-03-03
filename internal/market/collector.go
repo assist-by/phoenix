@@ -151,53 +151,53 @@ func (c *Collector) Collect(ctx context.Context) error {
 				}
 
 				if s.Type != signal.NoSignal {
-					// 매매 실행
-					if err := c.executeSignalTrade(ctx, s); err != nil {
-						c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
-					} else {
-						log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
-							s.Symbol, s.Type.String())
+					// // 매매 실행
+					// if err := c.executeSignalTrade(ctx, s); err != nil {
+					// 	c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
+					// } else {
+					// 	log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
+					// 		s.Symbol, s.Type.String())
+					// }
+
+					// 진입 가능 여부 확인
+					available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+					if err != nil {
+						log.Printf("진입 가능 여부 확인 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+
 					}
 
-					// // 진입 가능 여부 확인
-					// available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
-					// if err != nil {
-					// 	log.Printf("진입 가능 여부 확인 실패: %v", err)
-					// 	if err := c.discord.SendError(err); err != nil {
-					// 		log.Printf("에러 알림 전송 실패: %v", err)
-					// 	}
+					if !available {
+						log.Printf("진입 불가: %s", reason)
 
-					// }
+					}
 
-					// if !available {
-					// 	log.Printf("진입 불가: %s", reason)
+					balances, err := c.client.GetBalance(ctx)
+					if err != nil {
+						return fmt.Errorf("잔고 조회 실패: %w", err)
+					}
+					usdtBalance := balances["USDT"].Available
 
-					// }
+					// TradeInfo 생성
+					tradeInfo := notification.TradeInfo{
+						Symbol:        s.Symbol,
+						PositionType:  s.Type.String(),
+						PositionValue: positionValue,
+						EntryPrice:    s.Price,
+						StopLoss:      s.StopLoss,
+						TakeProfit:    s.TakeProfit,
+						Balance:       usdtBalance,
+						Leverage:      5,
+					}
 
-					// balances, err := c.client.GetBalance(ctx)
-					// if err != nil {
-					// 	return fmt.Errorf("잔고 조회 실패: %w", err)
-					// }
-					// usdtBalance := balances["USDT"].Available
-
-					// // TradeInfo 생성
-					// tradeInfo := notification.TradeInfo{
-					// 	Symbol:        s.Symbol,
-					// 	PositionType:  s.Type.String(),
-					// 	PositionValue: positionValue,
-					// 	EntryPrice:    s.Price,
-					// 	StopLoss:      s.StopLoss,
-					// 	TakeProfit:    s.TakeProfit,
-					// 	Balance:       usdtBalance,
-					// 	Leverage:      5,
-					// }
-
-					// if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
-					// 	log.Printf("거래 정보 알림 전송 실패: %v", err)
-					// 	if err := c.discord.SendError(err); err != nil {
-					// 		log.Printf("에러 알림 전송 실패: %v", err)
-					// 	}
-					// }
+					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+						log.Printf("거래 정보 알림 전송 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+					}
 				}
 			}
 
@@ -212,21 +212,56 @@ func (c *Collector) Collect(ctx context.Context) error {
 	return nil
 }
 
-// calculatePositionValue는 수수료와 유지증거금을 고려하여 최대 포지션 크기를 계산합니다
-// 최대 포지션 크기 계산식
-// 최대 포지션 = 가용잔고 × 레버리지 / (1 + 유지증거금률 + 총수수료율)
+// // calculatePositionValue는 수수료와 유지증거금을 고려하여 최대 포지션 크기를 계산합니다
+// // 최대 포지션 크기 계산식
+// // 최대 포지션 = 가용잔고 × 레버리지 / (1 + 유지증거금률 + 총수수료율)
+// func (c *Collector) calculatePositionValue(
+// 	balance float64,
+// 	leverage int,
+// 	maintMargin float64,
+// ) float64 {
+// 	// 수수료율 (진입 + 청산)
+// 	totalFeeRate := 0.001 // 0.1%
+
+// 	// 포지션 크기 계산
+// 	positionSize := (balance * float64(leverage)) / (1 + maintMargin + totalFeeRate)
+
+// 	return math.Floor(positionSize*100) / 100 // 소수점 2자리까지 내림
+// }
+
+// calculatePositionValue는 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기를 계산합니다
+// 단계별 계산:
+// 1. 이론적 최대 포지션 = 가용잔고 × 레버리지
+// 2. 이론적 최대 수량 = 이론적 최대 포지션 ÷ 코인 가격
+// 3. 실제 수량 = 이론적 최대 수량을 최소 주문 단위로 내림
+// 4. 실제 포지션 가치 = 실제 수량 × 코인 가격
+// 5. 수수료 및 마진 고려해 최종 조정
 func (c *Collector) calculatePositionValue(
-	balance float64,
-	leverage int,
-	maintMargin float64,
+	balance float64, // 가용 잔고
+	leverage int, // 레버리지
+	coinPrice float64, // 코인 현재 가격
+	stepSize float64, // 코인 최소 주문 단위
+	maintMargin float64, // 유지증거금률
 ) float64 {
-	// 수수료율 (진입 + 청산)
-	totalFeeRate := 0.001 // 0.1%
+	// 1. 이론적 최대 포지션 계산
+	theoreticalMaxPosition := balance * float64(leverage)
 
-	// 포지션 크기 계산
-	positionSize := (balance * float64(leverage)) / (1 + maintMargin + totalFeeRate)
+	// 2. 이론적 최대 코인 수량 계산
+	theoreticalMaxQuantity := theoreticalMaxPosition / coinPrice
 
-	return math.Floor(positionSize*100) / 100 // 소수점 2자리까지 내림
+	// 3. 최소 주문 단위로 수량 조정
+	steps := math.Floor(theoreticalMaxQuantity / stepSize)
+	adjustedQuantity := steps * stepSize
+
+	// 4. 조정된 수량으로 실제 포지션 가치 계산
+	actualPositionValue := adjustedQuantity * coinPrice
+
+	// 5. 수수료와 유지증거금을 고려한 최종 조정
+	totalFeeRate := 0.001 // 0.1% (진입 + 청산 수수료)
+	finalPositionValue := actualPositionValue / (1 + maintMargin + totalFeeRate)
+
+	// 소수점 2자리까지 내림
+	return math.Floor(finalPositionValue*100) / 100
 }
 
 // findBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
@@ -282,7 +317,13 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 		return false, "USDT 잔고가 없습니다", 0, nil
 	}
 
-	// 3. 레버리지 브라켓 정보 조회
+	// 3. 심볼 정보 조회
+	symbolInfo, err := c.client.GetSymbolInfo(ctx, coinSignal.Symbol)
+	if err != nil {
+		return false, "", 0, fmt.Errorf("심볼 정보 조회 실패: %w", err)
+	}
+
+	// 4. 레버리지 브라켓 정보 조회
 	brackets, err := c.client.GetLeverageBrackets(ctx, coinSignal.Symbol)
 	if err != nil {
 		return false, "", 0, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
@@ -322,16 +363,19 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 		c.discord.SendError(err)
 	}
 
-	// 4. 포지션 크기 계산
+	// 5. 포지션 크기 계산
 	positionValue := c.calculatePositionValue(
 		usdtBalance.Available,
 		leverage,
+		coinSignal.Price,
+		symbolInfo.StepSize,
 		bracket.MaintMarginRatio,
 	)
 
 	return true, "", positionValue, nil
 }
 
+// TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
 // executeSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
 func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) error {
 	if s.Type == signal.NoSignal {

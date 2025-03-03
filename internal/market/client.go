@@ -293,6 +293,92 @@ func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResp
 	return &result, nil
 }
 
+// GetSymbolInfo는 특정 심볼의 거래 정보만 조회합니다
+func (c *Client) GetSymbolInfo(ctx context.Context, symbol string) (*SymbolInfo, error) {
+	// 요청 파라미터에 심볼 추가
+	params := url.Values{}
+	params.Add("symbol", symbol)
+
+	// 특정 심볼에 대한 exchangeInfo 호출
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/exchangeInfo", params, false)
+	if err != nil {
+		return nil, fmt.Errorf("심볼 정보 조회 실패: %w", err)
+	}
+
+	// exchangeInfo 응답 구조체 정의
+	var exchangeInfo struct {
+		Symbols []struct {
+			Symbol            string `json:"symbol"`
+			PricePrecision    int    `json:"pricePrecision"`
+			QuantityPrecision int    `json:"quantityPrecision"`
+			Filters           []struct {
+				FilterType  string `json:"filterType"`
+				StepSize    string `json:"stepSize,omitempty"`
+				TickSize    string `json:"tickSize,omitempty"`
+				MinNotional string `json:"notional,omitempty"`
+			} `json:"filters"`
+		} `json:"symbols"`
+	}
+
+	// JSON 응답 파싱
+	if err := json.Unmarshal(resp, &exchangeInfo); err != nil {
+		return nil, fmt.Errorf("심볼 정보 파싱 실패: %w", err)
+	}
+
+	// 응답에 심볼 정보가 없는 경우
+	if len(exchangeInfo.Symbols) == 0 {
+		return nil, fmt.Errorf("심볼 정보를 찾을 수 없음: %s", symbol)
+	}
+
+	// 첫 번째(유일한) 심볼 정보 사용
+	s := exchangeInfo.Symbols[0]
+
+	info := &SymbolInfo{
+		Symbol:            symbol,
+		PricePrecision:    s.PricePrecision,
+		QuantityPrecision: s.QuantityPrecision,
+	}
+
+	// 필터 정보 추출
+	for _, filter := range s.Filters {
+		switch filter.FilterType {
+		case "LOT_SIZE": // 수량 단위 필터
+			if filter.StepSize != "" {
+				stepSize, err := strconv.ParseFloat(filter.StepSize, 64)
+				if err != nil {
+					log.Printf("LOT_SIZE 파싱 오류: %v", err)
+					continue
+				}
+				info.StepSize = stepSize
+			}
+		case "PRICE_FILTER": // 가격 단위 필터
+			if filter.TickSize != "" {
+				tickSize, err := strconv.ParseFloat(filter.TickSize, 64)
+				if err != nil {
+					log.Printf("PRICE_FILTER 파싱 오류: %v", err)
+					continue
+				}
+				info.TickSize = tickSize
+			}
+		case "MIN_NOTIONAL": // 최소 주문 가치 필터
+			if filter.MinNotional != "" {
+				minNotional, err := strconv.ParseFloat(filter.MinNotional, 64)
+				if err != nil {
+					log.Printf("MIN_NOTIONAL 파싱 오류: %v", err)
+					continue
+				}
+				info.MinNotional = minNotional
+			}
+		}
+	}
+
+	// 정보 로깅
+	log.Printf("심볼 정보 조회: %s (최소단위: %.8f, 가격단위: %.8f, 최소주문가치: %.2f)",
+		info.Symbol, info.StepSize, info.TickSize, info.MinNotional)
+
+	return info, nil
+}
+
 // func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
 // 	params := url.Values{}
 // 	params.Add("symbol", order.Symbol)

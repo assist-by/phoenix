@@ -1968,53 +1968,53 @@ func (c *Collector) Collect(ctx context.Context) error {
 				}
 
 				if s.Type != signal.NoSignal {
-					// 매매 실행
-					if err := c.executeSignalTrade(ctx, s); err != nil {
-						c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
-					} else {
-						log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
-							s.Symbol, s.Type.String())
+					// // 매매 실행
+					// if err := c.executeSignalTrade(ctx, s); err != nil {
+					// 	c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
+					// } else {
+					// 	log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
+					// 		s.Symbol, s.Type.String())
+					// }
+
+					// 진입 가능 여부 확인
+					available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
+					if err != nil {
+						log.Printf("진입 가능 여부 확인 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+
 					}
 
-					// // 진입 가능 여부 확인
-					// available, reason, positionValue, err := c.checkEntryAvailable(ctx, s)
-					// if err != nil {
-					// 	log.Printf("진입 가능 여부 확인 실패: %v", err)
-					// 	if err := c.discord.SendError(err); err != nil {
-					// 		log.Printf("에러 알림 전송 실패: %v", err)
-					// 	}
+					if !available {
+						log.Printf("진입 불가: %s", reason)
 
-					// }
+					}
 
-					// if !available {
-					// 	log.Printf("진입 불가: %s", reason)
+					balances, err := c.client.GetBalance(ctx)
+					if err != nil {
+						return fmt.Errorf("잔고 조회 실패: %w", err)
+					}
+					usdtBalance := balances["USDT"].Available
 
-					// }
+					// TradeInfo 생성
+					tradeInfo := notification.TradeInfo{
+						Symbol:        s.Symbol,
+						PositionType:  s.Type.String(),
+						PositionValue: positionValue,
+						EntryPrice:    s.Price,
+						StopLoss:      s.StopLoss,
+						TakeProfit:    s.TakeProfit,
+						Balance:       usdtBalance,
+						Leverage:      5,
+					}
 
-					// balances, err := c.client.GetBalance(ctx)
-					// if err != nil {
-					// 	return fmt.Errorf("잔고 조회 실패: %w", err)
-					// }
-					// usdtBalance := balances["USDT"].Available
-
-					// // TradeInfo 생성
-					// tradeInfo := notification.TradeInfo{
-					// 	Symbol:        s.Symbol,
-					// 	PositionType:  s.Type.String(),
-					// 	PositionValue: positionValue,
-					// 	EntryPrice:    s.Price,
-					// 	StopLoss:      s.StopLoss,
-					// 	TakeProfit:    s.TakeProfit,
-					// 	Balance:       usdtBalance,
-					// 	Leverage:      5,
-					// }
-
-					// if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
-					// 	log.Printf("거래 정보 알림 전송 실패: %v", err)
-					// 	if err := c.discord.SendError(err); err != nil {
-					// 		log.Printf("에러 알림 전송 실패: %v", err)
-					// 	}
-					// }
+					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+						log.Printf("거래 정보 알림 전송 실패: %v", err)
+						if err := c.discord.SendError(err); err != nil {
+							log.Printf("에러 알림 전송 실패: %v", err)
+						}
+					}
 				}
 			}
 
