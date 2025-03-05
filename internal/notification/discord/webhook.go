@@ -30,7 +30,7 @@ func (c *Client) SendError(err error) error {
 	embed := NewEmbed().
 		SetTitle("에러 발생").
 		SetDescription(fmt.Sprintf("```%v```", err)).
-		SetColor(ColorError).
+		SetColor(notification.ColorError).
 		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(time.Now())
 
@@ -45,7 +45,7 @@ func (c *Client) SendError(err error) error {
 func (c *Client) SendInfo(message string) error {
 	embed := NewEmbed().
 		SetDescription(message).
-		SetColor(ColorInfo).
+		SetColor(notification.ColorInfo).
 		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(time.Now())
 
@@ -81,16 +81,4 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	}
 
 	return c.sendToWebhook(c.tradeWebhook, msg)
-}
-
-// getColorForSignal은 시그널 타입에 따른 색상을 반환합니다
-func getColorForSignal(signalType notification.SignalType) int {
-	switch signalType {
-	case notification.SignalLong:
-		return ColorSuccess
-	case notification.SignalShort:
-		return ColorError
-	default:
-		return ColorInfo
-	}
 }

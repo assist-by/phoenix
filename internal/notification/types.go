@@ -6,12 +6,15 @@ import "time"
 type SignalType string
 
 const (
-	SignalLong   SignalType = "LONG"
-	SignalShort  SignalType = "SHORT"
-	SignalClose  SignalType = "CLOSE"
-	ColorSuccess            = 0x00FF00
-	ColorError              = 0xFF0000
-	ColorInfo               = 0x0000FF
+	SignalLong         SignalType = "LONG"
+	SignalShort        SignalType = "SHORT"
+	SignalClose        SignalType = "CLOSE"
+	SignalPendingLong  SignalType = "PENDINGLONG"  // 롱 대기 상태
+	SignalPendingShort SignalType = "PENDINGSHORT" // 숏 대기 상태
+	ColorSuccess                  = 0x00FF00
+	ColorError                    = 0xFF0000
+	ColorInfo                     = 0x0000FF
+	ColorWarning                  = 0xFFA500 // 대기 상태를 위한 주황색 추가
 )
 
 // Signal은 트레이딩 시그널 정보를 담는 구조체입니다
@@ -55,6 +58,8 @@ func GetColorForPosition(positionType string) int {
 		return ColorSuccess
 	case "SHORT":
 		return ColorError
+	case "PENDINGLONG", "PENDINGSHORT":
+		return ColorWarning
 	default:
 		return ColorInfo
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/notification"
 )
 
 // SendSignal은 시그널 알림을 Discord로 전송합니다
@@ -15,15 +16,23 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 	case signal.Long:
 		emoji = "🚀"
 		title = "LONG"
-		color = ColorSuccess
+		color = notification.ColorSuccess
 	case signal.Short:
 		emoji = "🔻"
 		title = "SHORT"
-		color = ColorError
+		color = notification.ColorError
+	case signal.PendingLong:
+		emoji = "⏳"
+		title = "PENDING LONG"
+		color = notification.ColorWarning
+	case signal.PendingShort:
+		emoji = "⏳"
+		title = "PENDING SHORT"
+		color = notification.ColorWarning
 	default:
 		emoji = "⚠️"
 		title = "NO SIGNAL"
-		color = ColorInfo
+		color = notification.ColorInfo
 	}
 
 	// 시그널 조건 상태 표시
@@ -40,6 +49,7 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 		getCheckMark(s.Conditions.EMAShort),
 		getCheckMark(s.Conditions.MACDShort),
 		getCheckMark(s.Conditions.SARShort))
+
 	// 기술적 지표 값
 	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
 		s.Conditions.EMAValue,
@@ -76,6 +86,23 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 			slPct,
 			s.TakeProfit,
 			tpPct,
+		))
+	} else if s.Type == signal.PendingLong || s.Type == signal.PendingShort {
+		// 대기 상태 정보 표시
+		var waitingFor string
+		if s.Type == signal.PendingLong {
+			waitingFor = "SAR가 캔들 아래로 이동 대기 중"
+		} else {
+			waitingFor = "SAR가 캔들 위로 이동 대기 중"
+		}
+
+		embed.SetDescription(fmt.Sprintf(`**시간**: %s
+**현재가**: $%.2f
+**대기 상태**: %s
+**조건**: MACD 크로스 발생, SAR 위치 부적절`,
+			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
+			s.Price,
+			waitingFor,
 		))
 	} else {
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s

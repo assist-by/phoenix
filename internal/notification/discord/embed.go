@@ -32,13 +32,6 @@ type EmbedFooter struct {
 	Text string `json:"text"`
 }
 
-// 임베드 색상 상수
-const (
-	ColorSuccess = 0x00FF00 // 초록색
-	ColorError   = 0xFF0000 // 빨간색
-	ColorInfo    = 0x0099FF // 파란색
-)
-
 // NewEmbed는 새로운 임베드를 생성합니다
 func NewEmbed() *Embed {
 	return &Embed{}
