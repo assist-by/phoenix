@@ -45,10 +45,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
+	osSignal "os/signal"
 	"syscall"
 	"time"
 
+	"github.com/assist-by/phoenix/internal/analysis/signal"
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/market"
 	"github.com/assist-by/phoenix/internal/notification/discord"
@@ -123,10 +124,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 시그널 감지기 생성
+	detector := signal.NewDetector(signal.DetectorConfig{
+		EMALength:      200,
+		StopLossPct:    0.02,
+		TakeProfitPct:  0.04,
+		MinHistogram:   0.00005,
+		MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
+	})
+
 	// 데이터 수집기 생성
 	collector := market.NewCollector(
 		binanceClient,
 		discordClient,
+		detector,
 		cfg.App.FetchInterval,
 		cfg.App.CandleLimit,
 		market.WithRetryConfig(market.RetryConfig{
@@ -148,7 +159,7 @@ func main() {
 
 	// 시그널 처리
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	osSignal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// 스케줄러 시작
 	go func() {
@@ -704,27 +715,30 @@ package signal
 
 import (
 	"fmt"
+	"log"
 
 	"github.com/assist-by/phoenix/internal/analysis/indicator"
 )
 
+// DetectorConfig는 시그널 감지기 설정을 정의합니다
+type DetectorConfig struct {
+	EMALength      int // EMA 기간 (기본값: 200)
+	StopLossPct    float64
+	TakeProfitPct  float64
+	MinHistogram   float64 // 최소 MACD 히스토그램 값 (기본값: 0.00005)
+	MaxWaitCandles int     // 최대 대기 캔들 수 (기본값: 5)
+}
+
 // NewDetector는 새로운 시그널 감지기를 생성합니다
 func NewDetector(config DetectorConfig) *Detector {
 	return &Detector{
-		states:        make(map[string]*SymbolState),
-		emaLength:     config.EMALength,
-		stopLossPct:   config.StopLossPct,
-		takeProfitPct: config.TakeProfitPct,
-		minHistogram:  config.MinHistogram,
+		states:         make(map[string]*SymbolState),
+		emaLength:      config.EMALength,
+		stopLossPct:    config.StopLossPct,
+		takeProfitPct:  config.TakeProfitPct,
+		minHistogram:   config.MinHistogram,
+		maxWaitCandles: config.MaxWaitCandles,
 	}
-}
-
-// DetectorConfig는 시그널 감지기 설정을 정의합니다
-type DetectorConfig struct {
-	EMALength     int // EMA 기간 (기본값: 200)
-	StopLossPct   float64
-	TakeProfitPct float64
-	MinHistogram  float64 // 최소 MACD 히스토그램 값 (기본값: 0.00005)
 }
 
 // Detect는 주어진 데이터로부터 시그널을 감지합니다
@@ -759,6 +773,16 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 	currentPrice := prices[len(prices)-1].Close
 	currentMACD := macd[len(macd)-1].MACD
 	currentSignal := macd[len(macd)-1].Signal
+	currentHistogram := currentMACD - currentSignal
+	currentEMA := ema[len(ema)-1].Value
+	currentSAR := sar[len(sar)-1].SAR
+	currentHigh := prices[len(prices)-1].High
+	currentLow := prices[len(prices)-1].Low
+
+	/// EMA 및 SAR 조건 확인
+	isAboveEMA := currentPrice > currentEMA
+	sarBelowCandle := currentSAR < currentLow
+	sarAboveCandle := currentSAR > currentHigh
 
 	// MACD 크로스 확인 - 이제 심볼별 상태 사용
 	macdCross := d.checkMACDCross(
@@ -768,10 +792,7 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		state.PrevSignal,
 	)
 
-	// 상태 업데이트
-	state.PrevMACD = currentMACD
-	state.PrevSignal = currentSignal
-
+	// 기본 시그널 객체 생성
 	signal := &Signal{
 		Type:      NoSignal,
 		Symbol:    symbol,
@@ -779,50 +800,162 @@ func (d *Detector) Detect(symbol string, prices []indicator.PriceData) (*Signal,
 		Timestamp: prices[len(prices)-1].Time,
 	}
 
-	// MACD 히스토그램 계산
-	histogram := currentMACD - currentSignal
+	// 시그널 조건
+	signal.Conditions = SignalConditions{
+		EMALong:     isAboveEMA,
+		EMAShort:    !isAboveEMA,
+		MACDLong:    macdCross == 1,
+		MACDShort:   macdCross == -1,
+		SARLong:     sarBelowCandle,
+		SARShort:    !sarBelowCandle,
+		EMAValue:    currentEMA,
+		MACDValue:   currentMACD,
+		SignalValue: currentSignal,
+		SARValue:    currentSAR,
+	}
+
+	// 1. 대기 상태 확인 및 업데이트
+	if state.PendingSignal != NoSignal {
+		pendingSignal := d.processPendingState(state, symbol, signal, currentHistogram, sarBelowCandle, sarAboveCandle)
+		if pendingSignal != nil {
+			// 상태 업데이트
+			state.PrevMACD = currentMACD
+			state.PrevSignal = currentSignal
+			state.PrevHistogram = currentHistogram
+			state.LastSignal = pendingSignal
+			return pendingSignal, nil
+		}
+	}
+
+	// 2. 일반 시그널 조건 확인 (대기 상태가 없거나 취소된 경우)
 
 	// Long 시그널
-	if currentPrice > ema[len(ema)-1].Value && // EMA 200 위
+	if isAboveEMA && // EMA 200 위
 		macdCross == 1 && // MACD 상향 돌파
-		histogram >= d.minHistogram && // MACD 히스토그램이 최소값 이상
-		sar[len(sar)-1].SAR < prices[len(prices)-1].Low { // SAR이 현재 봉의 저가보다 낮음
+		currentHistogram >= d.minHistogram && // MACD 히스토그램이 최소값 이상
+		sarBelowCandle { // SAR이 현재 봉의 저가보다 낮음
 
 		signal.Type = Long
-		signal.StopLoss = sar[len(sar)-1].SAR                               // SAR 기반 손절가
+		signal.StopLoss = currentSAR                                        // SAR 기반 손절가
 		signal.TakeProfit = currentPrice + (currentPrice - signal.StopLoss) // 1:1 비율
+
+		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
+			symbol, currentPrice, currentEMA, currentSAR)
 	}
 
 	// Short 시그널
-	if currentPrice < ema[len(ema)-1].Value && // EMA 200 아래
+	if !isAboveEMA && // EMA 200 아래
 		macdCross == -1 && // MACD 하향 돌파
-		-histogram >= d.minHistogram && // 음수 히스토그램에 대한 조건
-		sar[len(sar)-1].SAR > prices[len(prices)-1].High { // SAR이 현재 봉의 고가보다 높음
+		-currentHistogram >= d.minHistogram && // 음수 히스토그램에 대한 조건
+		sarAboveCandle { // SAR이 현재 봉의 고가보다 높음
 
 		signal.Type = Short
-		signal.StopLoss = sar[len(sar)-1].SAR                               // SAR 기반 손절가
+		signal.StopLoss = currentSAR                                        // SAR 기반 손절가
 		signal.TakeProfit = currentPrice - (signal.StopLoss - currentPrice) // 1:1 비율
+
+		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
+			symbol, currentPrice, currentEMA, currentSAR)
 	}
 
-	emaCondition := currentPrice > ema[len(ema)-1].Value
-	sarCondition := sar[len(sar)-1].SAR < prices[len(prices)-1].Low
+	// 3. 새로운 대기 상태 설정 (일반 시그널이 아닌 경우)
+	if signal.Type == NoSignal {
+		// MACD 상향돌파 + EMA 위 + SAR 캔들 아래가 아닌 경우 -> 롱 대기 상태
+		if isAboveEMA && macdCross == 1 && !sarBelowCandle && currentHistogram > 0 {
+			state.PendingSignal = PendingLong
+			state.WaitedCandles = 0
+			log.Printf("[%s] Long 대기 상태 시작: MACD 상향돌파, SAR 반전 대기", symbol)
+		}
 
-	// 시그널 조건
-	signal.Conditions = SignalConditions{
-		EMALong:     emaCondition,
-		EMAShort:    !emaCondition,
-		MACDLong:    macdCross == 1,
-		MACDShort:   macdCross == -1,
-		SARLong:     sarCondition,
-		SARShort:    !sarCondition,
-		EMAValue:    ema[len(ema)-1].Value,
-		MACDValue:   currentMACD,
-		SignalValue: currentSignal,
-		SARValue:    sar[len(sar)-1].SAR,
+		// MACD 하향돌파 + EMA 아래 + SAR이 캔들 위가 아닌 경우 → 숏 대기 상태
+		if !isAboveEMA && macdCross == -1 && !sarAboveCandle && currentHistogram < 0 {
+			state.PendingSignal = PendingShort
+			state.WaitedCandles = 0
+			log.Printf("[%s] Short 대기 상태 시작: MACD 하향돌파, SAR 반전 대기", symbol)
+		}
+	}
+
+	// 상태 업데이트
+	state.PrevMACD = currentMACD
+	state.PrevSignal = currentSignal
+	state.PrevHistogram = currentHistogram
+
+	if signal.Type != NoSignal {
+		state.LastSignal = signal
 	}
 
 	state.LastSignal = signal
 	return signal, nil
+}
+
+// processPendingState는 대기 상태를 처리하고 시그널을 생성합니다
+func (d *Detector) processPendingState(state *SymbolState, symbol string, baseSignal *Signal, currentHistogram float64, sarBelowCandle bool, sarAboveCandle bool) *Signal {
+	// 캔들 카운트 증가
+	state.WaitedCandles++
+
+	// 최대 대기 시간 초과 체크
+	if state.WaitedCandles > state.MaxWaitCandles {
+		log.Printf("[%s] 대기 상태 취소: 최대 대기 캔들 수 (%d) 초과", symbol, state.MaxWaitCandles)
+		d.resetPendingState(state)
+		return nil
+	}
+
+	resultSignal := &Signal{
+		Type:       NoSignal,
+		Symbol:     baseSignal.Symbol,
+		Price:      baseSignal.Price,
+		Timestamp:  baseSignal.Timestamp,
+		Conditions: baseSignal.Conditions,
+	}
+
+	// Long 대기 상태 처리
+	if state.PendingSignal == PendingLong {
+		// 히스토그램이 음수로 바뀌면 취소(추세 역전)
+		if currentHistogram < 0 && state.PrevHistogram > 0 {
+			log.Printf("[%s] Long 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f)",
+				symbol, state.PrevHistogram, currentHistogram)
+			d.resetPendingState(state)
+			return nil
+		}
+
+		// SAR가 캔들 아래로 이동하면 롱 시그널 생성
+		if sarBelowCandle {
+			resultSignal.Type = Long
+			resultSignal.StopLoss = baseSignal.Conditions.SARValue
+			resultSignal.TakeProfit = baseSignal.Price + (baseSignal.Price - resultSignal.StopLoss)
+
+			log.Printf("[%s] Long 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
+				symbol, state.WaitedCandles)
+
+			d.resetPendingState(state)
+			return resultSignal
+		}
+	}
+
+	// Short 대기 상태 처리
+	if state.PendingSignal == PendingShort {
+		// 히스토그램이 양수로 바뀌면 취소 (추세 역전)
+		if currentHistogram > 0 && state.PrevHistogram < 0 {
+			log.Printf("[%s] Short 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f)",
+				symbol, state.PrevHistogram, currentHistogram)
+			d.resetPendingState(state)
+			return nil
+		}
+
+		// SAR이 캔들 위로 이동하면 숏 시그널 생성
+		if sarAboveCandle {
+			resultSignal.Type = Short
+			resultSignal.StopLoss = baseSignal.Conditions.SARValue
+			resultSignal.TakeProfit = baseSignal.Price - (resultSignal.StopLoss - baseSignal.Price)
+
+			log.Printf("[%s] Short 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
+				symbol, state.WaitedCandles)
+
+			d.resetPendingState(state)
+			return resultSignal
+		}
+	}
+
+	return nil
 }
 
 // checkMACDCross는 MACD 크로스를 확인합니다
@@ -1118,6 +1251,270 @@ func almostEqual(a, b, tolerance float64) bool {
 	return diff <= tolerance
 }
 
+// generatePendingLongSignalPrices는 Long 대기 상태를 확인하기 위한 테스트 데이터를 생성합니다
+func generatePendingLongSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250) // EMA 200 계산을 위해 충분한 데이터
+
+	// 초기 하락 추세 생성 (0-99)
+	startPrice := 100.0
+	for i := 0; i < 100; i++ {
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - float64(i)*0.1,
+			High:   startPrice - float64(i)*0.1 + 0.05,
+			Low:    startPrice - float64(i)*0.1 - 0.05,
+			Close:  startPrice - float64(i)*0.1,
+			Volume: 1000.0,
+		}
+	}
+
+	// 상승 추세로 전환 시작 (100-199)
+	for i := 100; i < 200; i++ {
+		increment := float64(i-99) * 0.15
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + increment,
+			High:   startPrice + increment + 0.05,
+			Low:    startPrice + increment - 0.05,
+			Close:  startPrice + increment,
+			Volume: 1500.0,
+		}
+	}
+
+	// 중간에 강한 상승 추세 (200-240) - MACD 골든 크로스 만들기
+	for i := 200; i < 240; i++ {
+		increment := float64(i-199) * 0.3
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 15.0 + increment,
+			High:   startPrice + 15.0 + increment + 0.1,
+			Low:    startPrice + 15.0 + increment - 0.05,
+			Close:  startPrice + 15.0 + increment + 0.08,
+			Volume: 2000.0,
+		}
+	}
+
+	// 마지막 부분 (241-249)에서 SAR은 아직 캔들 위에 있지만 추세는 지속
+	// 이 부분은 대기 상태가 발생하는 구간
+	for i := 240; i < 245; i++ {
+		increment := float64(i-240) * 0.2
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 27.0 + increment,
+			High:   startPrice + 27.0 + increment + 0.05,
+			Low:    startPrice + 27.0 + increment - 0.05,
+			Close:  startPrice + 27.0 + increment + 0.04,
+			Volume: 1800.0,
+		}
+	}
+
+	// 마지막 부분 (245-249)에서 SAR이 캔들 아래로 이동하여 시그널 발생
+	for i := 245; i < 250; i++ {
+		increment := float64(i-245) * 0.5
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 28.0 + increment,
+			High:   startPrice + 28.0 + increment + 0.5,
+			Low:    startPrice + 28.0 + increment - 0.1,
+			Close:  startPrice + 28.0 + increment + 0.4,
+			Volume: 2500.0,
+		}
+	}
+
+	return prices
+}
+
+// generatePendingShortSignalPrices는 Short 대기 상태를 확인하기 위한 테스트 데이터를 생성합니다
+func generatePendingShortSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250)
+
+	// 초기 상승 추세 생성 (0-99)
+	startPrice := 100.0
+	for i := 0; i < 100; i++ {
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + float64(i)*0.1,
+			High:   startPrice + float64(i)*0.1 + 0.05,
+			Low:    startPrice + float64(i)*0.1 - 0.05,
+			Close:  startPrice + float64(i)*0.1,
+			Volume: 1000.0,
+		}
+	}
+
+	// 하락 추세로 전환 시작 (100-199)
+	for i := 100; i < 200; i++ {
+		decrement := float64(i-99) * 0.15
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - decrement,
+			High:   startPrice - decrement + 0.05,
+			Low:    startPrice - decrement - 0.05,
+			Close:  startPrice - decrement,
+			Volume: 1500.0,
+		}
+	}
+
+	// 강한 하락 추세 (200-240) - MACD 데드 크로스 만들기
+	for i := 200; i < 240; i++ {
+		decrement := float64(i-199) * 0.3
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 15.0 - decrement,
+			High:   startPrice - 15.0 - decrement + 0.05,
+			Low:    startPrice - 15.0 - decrement - 0.1,
+			Close:  startPrice - 15.0 - decrement - 0.08,
+			Volume: 2000.0,
+		}
+	}
+
+	// 마지막 부분 (241-245)에서 SAR은 아직 캔들 아래에 있지만 추세는 지속
+	// 이 부분은 대기 상태가 발생하는 구간
+	for i := 240; i < 245; i++ {
+		decrement := float64(i-240) * 0.2
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 27.0 - decrement,
+			High:   startPrice - 27.0 - decrement + 0.05,
+			Low:    startPrice - 27.0 - decrement - 0.05,
+			Close:  startPrice - 27.0 - decrement - 0.04,
+			Volume: 1800.0,
+		}
+	}
+
+	// 마지막 부분 (245-249)에서 SAR이 캔들 위로 이동하여 시그널 발생
+	for i := 245; i < 250; i++ {
+		decrement := float64(i-245) * 0.5
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 28.0 - decrement,
+			High:   startPrice - 28.0 - decrement + 0.1,
+			Low:    startPrice - 28.0 - decrement - 0.5,
+			Close:  startPrice - 28.0 - decrement - 0.4,
+			Volume: 2500.0,
+		}
+	}
+
+	return prices
+}
+
+// TestPendingSignals는 대기 상태에서 시그널 감지가 제대로 동작하는지 테스트합니다
+func TestPendingSignals(t *testing.T) {
+	detector := NewDetector(DetectorConfig{
+		EMALength:      200,
+		StopLossPct:    0.02,
+		TakeProfitPct:  0.04,
+		MaxWaitCandles: 5,
+		MinHistogram:   0.00005,
+	})
+
+	t.Run("롱 대기 상태 테스트", func(t *testing.T) {
+		prices := generatePendingLongSignalPrices()
+
+		// 테스트는 마지막 5개 캔들만 사용
+		startIdx := len(prices) - 5
+
+		// 첫 번째 캔들 (초기 상태)
+		signal, err := detector.Detect("BTCUSDT", prices[:startIdx+1])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != NoSignal {
+			t.Errorf("첫 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 두 번째 캔들 (MACD 골든크로스 발생, PendingLong 상태 진입)
+		signal, err = detector.Detect("BTCUSDT", prices[:startIdx+2])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+
+		// PendingLong 상태가 직접 리턴되지는 않지만, 내부적으로 상태가 유지됨
+		// 따라서 계속 NoSignal이 리턴됨
+		if signal.Type != NoSignal {
+			t.Errorf("두 번째 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 세 번째, 네 번째 캔들 (SAR 반전 기다리는 중)
+		for i := 3; i <= 4; i++ {
+			signal, err = detector.Detect("BTCUSDT", prices[:startIdx+i])
+			if err != nil {
+				t.Fatalf("시그널 감지 에러: %v", err)
+			}
+			if signal.Type != NoSignal {
+				t.Errorf("%d번째 캔들에서 예상 시그널 NoSignal, 실제 %s", i, signal.Type)
+			}
+		}
+
+		// 다섯 번째 캔들 (SAR 반전 발생, Long 시그널 생성)
+		signal, err = detector.Detect("BTCUSDT", prices)
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != Long {
+			t.Errorf("다섯 번째 캔들에서 예상 시그널 Long, 실제 %s", signal.Type)
+		}
+
+		// 스탑로스가 제대로 설정되었는지 확인
+		if signal.Type == Long && signal.StopLoss <= 0 {
+			t.Errorf("Long 시그널의 스탑로스가 올바르게 설정되지 않음: %f", signal.StopLoss)
+		}
+	})
+
+	t.Run("숏 대기 상태 테스트", func(t *testing.T) {
+		prices := generatePendingShortSignalPrices()
+
+		// 테스트는 마지막 5개 캔들만 사용
+		startIdx := len(prices) - 5
+
+		// 첫 번째 캔들 (초기 상태)
+		signal, err := detector.Detect("BTCUSDT", prices[:startIdx+1])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != NoSignal {
+			t.Errorf("첫 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 두 번째 캔들 (MACD 데드크로스 발생, PendingShort 상태 진입)
+		signal, err = detector.Detect("BTCUSDT", prices[:startIdx+2])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+
+		// PendingShort 상태가 직접 리턴되지는 않지만, 내부적으로 상태가 유지됨
+		if signal.Type != NoSignal {
+			t.Errorf("두 번째 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 세 번째, 네 번째 캔들 (SAR 반전 기다리는 중)
+		for i := 3; i <= 4; i++ {
+			signal, err = detector.Detect("BTCUSDT", prices[:startIdx+i])
+			if err != nil {
+				t.Fatalf("시그널 감지 에러: %v", err)
+			}
+			if signal.Type != NoSignal {
+				t.Errorf("%d번째 캔들에서 예상 시그널 NoSignal, 실제 %s", i, signal.Type)
+			}
+		}
+
+		// 다섯 번째 캔들 (SAR 반전 발생, Short 시그널 생성)
+		signal, err = detector.Detect("BTCUSDT", prices)
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != Short {
+			t.Errorf("다섯 번째 캔들에서 예상 시그널 Short, 실제 %s", signal.Type)
+		}
+
+		// 스탑로스가 제대로 설정되었는지 확인
+		if signal.Type == Short && signal.StopLoss <= 0 {
+			t.Errorf("Short 시그널의 스탑로스가 올바르게 설정되지 않음: %f", signal.StopLoss)
+		}
+	})
+}
+
 ```
 ## internal/analysis/signal/state.go
 ```go
@@ -1131,12 +1528,22 @@ func (d *Detector) getSymbolState(symbol string) *SymbolState {
 
 	if !exists {
 		d.mu.Lock()
-		state = &SymbolState{}
+		state = &SymbolState{
+			PendingSignal:  NoSignal,
+			WaitedCandles:  0,
+			MaxWaitCandles: d.maxWaitCandles,
+		}
 		d.states[symbol] = state
 		d.mu.Unlock()
 	}
 
 	return state
+}
+
+// resetPendingState는 심볼의 대기 상태를 초기화합니다
+func (d *Detector) resetPendingState(state *SymbolState) {
+	state.PendingSignal = NoSignal
+	state.WaitedCandles = 0
 }
 
 ```
@@ -1156,6 +1563,8 @@ const (
 	NoSignal SignalType = iota
 	Long
 	Short
+	PendingLong  // MACD 상향 돌파 후 SAR 반전 대기 상태
+	PendingShort // MACD 하향돌파 후 SAR 반전 대기 상태
 )
 
 func (s SignalType) String() string {
@@ -1166,6 +1575,10 @@ func (s SignalType) String() string {
 		return "Long"
 	case Short:
 		return "Short"
+	case PendingLong:
+		return "PendingLong"
+	case PendingShort:
+		return "PendingShort"
 	default:
 		return "Unknown"
 	}
@@ -1198,19 +1611,24 @@ type Signal struct {
 
 // SymbolState는 각 심볼별 상태를 관리합니다
 type SymbolState struct {
-	PrevMACD   float64
-	PrevSignal float64
-	LastSignal *Signal
+	PrevMACD       float64    // 이전 MACD 값
+	PrevSignal     float64    // 이전 Signal 값
+	PrevHistogram  float64    // 이전 히스토그램 값
+	LastSignal     *Signal    // 마지막 발생 시그널
+	PendingSignal  SignalType // 대기중인 시그널 타입
+	WaitedCandles  int        // 대기한 캔들 수
+	MaxWaitCandles int        // 최대 대기 캔들 수
 }
 
 // Detector는 시그널 감지기를 정의합니다
 type Detector struct {
-	states        map[string]*SymbolState
-	emaLength     int     // EMA 기간
-	stopLossPct   float64 // 손절 비율
-	takeProfitPct float64 // 익절 비율
-	minHistogram  float64 // MACD 히스토그램 최소값
-	mu            sync.RWMutex
+	states         map[string]*SymbolState
+	emaLength      int     // EMA 기간
+	stopLossPct    float64 // 손절 비율
+	takeProfitPct  float64 // 익절 비율
+	minHistogram   float64 // MACD 히스토그램 최소값
+	maxWaitCandles int     // 기본 최대 대기 캔들 수
+	mu             sync.RWMutex
 }
 
 ```
@@ -1929,25 +2347,21 @@ type RetryConfig struct {
 type Collector struct {
 	client        *Client
 	discord       *discord.Client
+	detector      *signal.Detector
 	fetchInterval time.Duration
 	candleLimit   int
 	retry         RetryConfig
-	detector      *signal.Detector
 	mu            sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, discord *discord.Client, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
+func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
 	c := &Collector{
 		client:        client,
 		discord:       discord,
+		detector:      detector,
 		fetchInterval: fetchInterval,
 		candleLimit:   candleLimit,
-		detector: signal.NewDetector(signal.DetectorConfig{
-			EMALength:     200,
-			StopLossPct:   0.02,
-			TakeProfitPct: 0.04,
-		}),
 	}
 
 	for _, opt := range opts {
@@ -2817,13 +3231,6 @@ type EmbedFooter struct {
 	Text string `json:"text"`
 }
 
-// 임베드 색상 상수
-const (
-	ColorSuccess = 0x00FF00 // 초록색
-	ColorError   = 0xFF0000 // 빨간색
-	ColorInfo    = 0x0099FF // 파란색
-)
-
 // NewEmbed는 새로운 임베드를 생성합니다
 func NewEmbed() *Embed {
 	return &Embed{}
@@ -2878,6 +3285,7 @@ import (
 	"fmt"
 
 	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/notification"
 )
 
 // SendSignal은 시그널 알림을 Discord로 전송합니다
@@ -2889,15 +3297,23 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 	case signal.Long:
 		emoji = "🚀"
 		title = "LONG"
-		color = ColorSuccess
+		color = notification.ColorSuccess
 	case signal.Short:
 		emoji = "🔻"
 		title = "SHORT"
-		color = ColorError
+		color = notification.ColorError
+	case signal.PendingLong:
+		emoji = "⏳"
+		title = "PENDING LONG"
+		color = notification.ColorWarning
+	case signal.PendingShort:
+		emoji = "⏳"
+		title = "PENDING SHORT"
+		color = notification.ColorWarning
 	default:
 		emoji = "⚠️"
 		title = "NO SIGNAL"
-		color = ColorInfo
+		color = notification.ColorInfo
 	}
 
 	// 시그널 조건 상태 표시
@@ -2914,6 +3330,7 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 		getCheckMark(s.Conditions.EMAShort),
 		getCheckMark(s.Conditions.MACDShort),
 		getCheckMark(s.Conditions.SARShort))
+
 	// 기술적 지표 값
 	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
 		s.Conditions.EMAValue,
@@ -2950,6 +3367,23 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 			slPct,
 			s.TakeProfit,
 			tpPct,
+		))
+	} else if s.Type == signal.PendingLong || s.Type == signal.PendingShort {
+		// 대기 상태 정보 표시
+		var waitingFor string
+		if s.Type == signal.PendingLong {
+			waitingFor = "SAR가 캔들 아래로 이동 대기 중"
+		} else {
+			waitingFor = "SAR가 캔들 위로 이동 대기 중"
+		}
+
+		embed.SetDescription(fmt.Sprintf(`**시간**: %s
+**현재가**: $%.2f
+**대기 상태**: %s
+**조건**: MACD 크로스 발생, SAR 위치 부적절`,
+			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
+			s.Price,
+			waitingFor,
 		))
 	} else {
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
@@ -3010,7 +3444,7 @@ func (c *Client) SendError(err error) error {
 	embed := NewEmbed().
 		SetTitle("에러 발생").
 		SetDescription(fmt.Sprintf("```%v```", err)).
-		SetColor(ColorError).
+		SetColor(notification.ColorError).
 		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(time.Now())
 
@@ -3025,7 +3459,7 @@ func (c *Client) SendError(err error) error {
 func (c *Client) SendInfo(message string) error {
 	embed := NewEmbed().
 		SetDescription(message).
-		SetColor(ColorInfo).
+		SetColor(notification.ColorInfo).
 		SetFooter("Assist by Trading Bot 🤖").
 		SetTimestamp(time.Now())
 
@@ -3063,18 +3497,6 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	return c.sendToWebhook(c.tradeWebhook, msg)
 }
 
-// getColorForSignal은 시그널 타입에 따른 색상을 반환합니다
-func getColorForSignal(signalType notification.SignalType) int {
-	switch signalType {
-	case notification.SignalLong:
-		return ColorSuccess
-	case notification.SignalShort:
-		return ColorError
-	default:
-		return ColorInfo
-	}
-}
-
 ```
 ## internal/notification/types.go
 ```go
@@ -3086,12 +3508,15 @@ import "time"
 type SignalType string
 
 const (
-	SignalLong   SignalType = "LONG"
-	SignalShort  SignalType = "SHORT"
-	SignalClose  SignalType = "CLOSE"
-	ColorSuccess            = 0x00FF00
-	ColorError              = 0xFF0000
-	ColorInfo               = 0x0000FF
+	SignalLong         SignalType = "LONG"
+	SignalShort        SignalType = "SHORT"
+	SignalClose        SignalType = "CLOSE"
+	SignalPendingLong  SignalType = "PENDINGLONG"  // 롱 대기 상태
+	SignalPendingShort SignalType = "PENDINGSHORT" // 숏 대기 상태
+	ColorSuccess                  = 0x00FF00
+	ColorError                    = 0xFF0000
+	ColorInfo                     = 0x0000FF
+	ColorWarning                  = 0xFFA500 // 대기 상태를 위한 주황색 추가
 )
 
 // Signal은 트레이딩 시그널 정보를 담는 구조체입니다
@@ -3135,6 +3560,8 @@ func GetColorForPosition(positionType string) int {
 		return ColorSuccess
 	case "SHORT":
 		return ColorError
+	case "PENDINGLONG", "PENDINGSHORT":
+		return ColorWarning
 	default:
 		return ColorInfo
 	}

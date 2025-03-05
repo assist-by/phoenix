@@ -90,7 +90,7 @@ func main() {
 		StopLossPct:    0.02,
 		TakeProfitPct:  0.04,
 		MinHistogram:   0.00005,
-		MaxWaitCandles: 5, // 대기 상태 최대 캔들 수 설정
+		MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
 	})
 
 	// 데이터 수집기 생성
