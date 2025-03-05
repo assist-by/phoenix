@@ -261,3 +261,267 @@ func almostEqual(a, b, tolerance float64) bool {
 	}
 	return diff <= tolerance
 }
+
+// generatePendingLongSignalPrices는 Long 대기 상태를 확인하기 위한 테스트 데이터를 생성합니다
+func generatePendingLongSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250) // EMA 200 계산을 위해 충분한 데이터
+
+	// 초기 하락 추세 생성 (0-99)
+	startPrice := 100.0
+	for i := 0; i < 100; i++ {
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - float64(i)*0.1,
+			High:   startPrice - float64(i)*0.1 + 0.05,
+			Low:    startPrice - float64(i)*0.1 - 0.05,
+			Close:  startPrice - float64(i)*0.1,
+			Volume: 1000.0,
+		}
+	}
+
+	// 상승 추세로 전환 시작 (100-199)
+	for i := 100; i < 200; i++ {
+		increment := float64(i-99) * 0.15
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + increment,
+			High:   startPrice + increment + 0.05,
+			Low:    startPrice + increment - 0.05,
+			Close:  startPrice + increment,
+			Volume: 1500.0,
+		}
+	}
+
+	// 중간에 강한 상승 추세 (200-240) - MACD 골든 크로스 만들기
+	for i := 200; i < 240; i++ {
+		increment := float64(i-199) * 0.3
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 15.0 + increment,
+			High:   startPrice + 15.0 + increment + 0.1,
+			Low:    startPrice + 15.0 + increment - 0.05,
+			Close:  startPrice + 15.0 + increment + 0.08,
+			Volume: 2000.0,
+		}
+	}
+
+	// 마지막 부분 (241-249)에서 SAR은 아직 캔들 위에 있지만 추세는 지속
+	// 이 부분은 대기 상태가 발생하는 구간
+	for i := 240; i < 245; i++ {
+		increment := float64(i-240) * 0.2
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 27.0 + increment,
+			High:   startPrice + 27.0 + increment + 0.05,
+			Low:    startPrice + 27.0 + increment - 0.05,
+			Close:  startPrice + 27.0 + increment + 0.04,
+			Volume: 1800.0,
+		}
+	}
+
+	// 마지막 부분 (245-249)에서 SAR이 캔들 아래로 이동하여 시그널 발생
+	for i := 245; i < 250; i++ {
+		increment := float64(i-245) * 0.5
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + 28.0 + increment,
+			High:   startPrice + 28.0 + increment + 0.5,
+			Low:    startPrice + 28.0 + increment - 0.1,
+			Close:  startPrice + 28.0 + increment + 0.4,
+			Volume: 2500.0,
+		}
+	}
+
+	return prices
+}
+
+// generatePendingShortSignalPrices는 Short 대기 상태를 확인하기 위한 테스트 데이터를 생성합니다
+func generatePendingShortSignalPrices() []indicator.PriceData {
+	baseTime := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	prices := make([]indicator.PriceData, 250)
+
+	// 초기 상승 추세 생성 (0-99)
+	startPrice := 100.0
+	for i := 0; i < 100; i++ {
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice + float64(i)*0.1,
+			High:   startPrice + float64(i)*0.1 + 0.05,
+			Low:    startPrice + float64(i)*0.1 - 0.05,
+			Close:  startPrice + float64(i)*0.1,
+			Volume: 1000.0,
+		}
+	}
+
+	// 하락 추세로 전환 시작 (100-199)
+	for i := 100; i < 200; i++ {
+		decrement := float64(i-99) * 0.15
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - decrement,
+			High:   startPrice - decrement + 0.05,
+			Low:    startPrice - decrement - 0.05,
+			Close:  startPrice - decrement,
+			Volume: 1500.0,
+		}
+	}
+
+	// 강한 하락 추세 (200-240) - MACD 데드 크로스 만들기
+	for i := 200; i < 240; i++ {
+		decrement := float64(i-199) * 0.3
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 15.0 - decrement,
+			High:   startPrice - 15.0 - decrement + 0.05,
+			Low:    startPrice - 15.0 - decrement - 0.1,
+			Close:  startPrice - 15.0 - decrement - 0.08,
+			Volume: 2000.0,
+		}
+	}
+
+	// 마지막 부분 (241-245)에서 SAR은 아직 캔들 아래에 있지만 추세는 지속
+	// 이 부분은 대기 상태가 발생하는 구간
+	for i := 240; i < 245; i++ {
+		decrement := float64(i-240) * 0.2
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 27.0 - decrement,
+			High:   startPrice - 27.0 - decrement + 0.05,
+			Low:    startPrice - 27.0 - decrement - 0.05,
+			Close:  startPrice - 27.0 - decrement - 0.04,
+			Volume: 1800.0,
+		}
+	}
+
+	// 마지막 부분 (245-249)에서 SAR이 캔들 위로 이동하여 시그널 발생
+	for i := 245; i < 250; i++ {
+		decrement := float64(i-245) * 0.5
+		prices[i] = indicator.PriceData{
+			Time:   baseTime.Add(time.Hour * time.Duration(i)),
+			Open:   startPrice - 28.0 - decrement,
+			High:   startPrice - 28.0 - decrement + 0.1,
+			Low:    startPrice - 28.0 - decrement - 0.5,
+			Close:  startPrice - 28.0 - decrement - 0.4,
+			Volume: 2500.0,
+		}
+	}
+
+	return prices
+}
+
+// TestPendingSignals는 대기 상태에서 시그널 감지가 제대로 동작하는지 테스트합니다
+func TestPendingSignals(t *testing.T) {
+	detector := NewDetector(DetectorConfig{
+		EMALength:      200,
+		StopLossPct:    0.02,
+		TakeProfitPct:  0.04,
+		MaxWaitCandles: 5,
+		MinHistogram:   0.00005,
+	})
+
+	t.Run("롱 대기 상태 테스트", func(t *testing.T) {
+		prices := generatePendingLongSignalPrices()
+
+		// 테스트는 마지막 5개 캔들만 사용
+		startIdx := len(prices) - 5
+
+		// 첫 번째 캔들 (초기 상태)
+		signal, err := detector.Detect("BTCUSDT", prices[:startIdx+1])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != NoSignal {
+			t.Errorf("첫 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 두 번째 캔들 (MACD 골든크로스 발생, PendingLong 상태 진입)
+		signal, err = detector.Detect("BTCUSDT", prices[:startIdx+2])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+
+		// PendingLong 상태가 직접 리턴되지는 않지만, 내부적으로 상태가 유지됨
+		// 따라서 계속 NoSignal이 리턴됨
+		if signal.Type != NoSignal {
+			t.Errorf("두 번째 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 세 번째, 네 번째 캔들 (SAR 반전 기다리는 중)
+		for i := 3; i <= 4; i++ {
+			signal, err = detector.Detect("BTCUSDT", prices[:startIdx+i])
+			if err != nil {
+				t.Fatalf("시그널 감지 에러: %v", err)
+			}
+			if signal.Type != NoSignal {
+				t.Errorf("%d번째 캔들에서 예상 시그널 NoSignal, 실제 %s", i, signal.Type)
+			}
+		}
+
+		// 다섯 번째 캔들 (SAR 반전 발생, Long 시그널 생성)
+		signal, err = detector.Detect("BTCUSDT", prices)
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != Long {
+			t.Errorf("다섯 번째 캔들에서 예상 시그널 Long, 실제 %s", signal.Type)
+		}
+
+		// 스탑로스가 제대로 설정되었는지 확인
+		if signal.Type == Long && signal.StopLoss <= 0 {
+			t.Errorf("Long 시그널의 스탑로스가 올바르게 설정되지 않음: %f", signal.StopLoss)
+		}
+	})
+
+	t.Run("숏 대기 상태 테스트", func(t *testing.T) {
+		prices := generatePendingShortSignalPrices()
+
+		// 테스트는 마지막 5개 캔들만 사용
+		startIdx := len(prices) - 5
+
+		// 첫 번째 캔들 (초기 상태)
+		signal, err := detector.Detect("BTCUSDT", prices[:startIdx+1])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != NoSignal {
+			t.Errorf("첫 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 두 번째 캔들 (MACD 데드크로스 발생, PendingShort 상태 진입)
+		signal, err = detector.Detect("BTCUSDT", prices[:startIdx+2])
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+
+		// PendingShort 상태가 직접 리턴되지는 않지만, 내부적으로 상태가 유지됨
+		if signal.Type != NoSignal {
+			t.Errorf("두 번째 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		}
+
+		// 세 번째, 네 번째 캔들 (SAR 반전 기다리는 중)
+		for i := 3; i <= 4; i++ {
+			signal, err = detector.Detect("BTCUSDT", prices[:startIdx+i])
+			if err != nil {
+				t.Fatalf("시그널 감지 에러: %v", err)
+			}
+			if signal.Type != NoSignal {
+				t.Errorf("%d번째 캔들에서 예상 시그널 NoSignal, 실제 %s", i, signal.Type)
+			}
+		}
+
+		// 다섯 번째 캔들 (SAR 반전 발생, Short 시그널 생성)
+		signal, err = detector.Detect("BTCUSDT", prices)
+		if err != nil {
+			t.Fatalf("시그널 감지 에러: %v", err)
+		}
+		if signal.Type != Short {
+			t.Errorf("다섯 번째 캔들에서 예상 시그널 Short, 실제 %s", signal.Type)
+		}
+
+		// 스탑로스가 제대로 설정되었는지 확인
+		if signal.Type == Short && signal.StopLoss <= 0 {
+			t.Errorf("Short 시그널의 스탑로스가 올바르게 설정되지 않음: %f", signal.StopLoss)
+		}
+	})
+}
