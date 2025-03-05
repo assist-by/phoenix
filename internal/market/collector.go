@@ -26,25 +26,21 @@ type RetryConfig struct {
 type Collector struct {
 	client        *Client
 	discord       *discord.Client
+	detector      *signal.Detector
 	fetchInterval time.Duration
 	candleLimit   int
 	retry         RetryConfig
-	detector      *signal.Detector
 	mu            sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, discord *discord.Client, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
+func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
 	c := &Collector{
 		client:        client,
 		discord:       discord,
+		detector:      detector,
 		fetchInterval: fetchInterval,
 		candleLimit:   candleLimit,
-		detector: signal.NewDetector(signal.DetectorConfig{
-			EMALength:     200,
-			StopLossPct:   0.02,
-			TakeProfitPct: 0.04,
-		}),
 	}
 
 	for _, opt := range opts {

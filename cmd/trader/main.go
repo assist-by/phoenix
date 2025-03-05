@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/signal"
+	osSignal "os/signal"
 	"syscall"
 	"time"
 
+	"github.com/assist-by/phoenix/internal/analysis/signal"
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/market"
 	"github.com/assist-by/phoenix/internal/notification/discord"
@@ -83,10 +84,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 시그널 감지기 생성
+	detector := signal.NewDetector(signal.DetectorConfig{
+		EMALength:      200,
+		StopLossPct:    0.02,
+		TakeProfitPct:  0.04,
+		MinHistogram:   0.00005,
+		MaxWaitCandles: 5, // 대기 상태 최대 캔들 수 설정
+	})
+
 	// 데이터 수집기 생성
 	collector := market.NewCollector(
 		binanceClient,
 		discordClient,
+		detector,
 		cfg.App.FetchInterval,
 		cfg.App.CandleLimit,
 		market.WithRetryConfig(market.RetryConfig{
@@ -108,7 +119,7 @@ func main() {
 
 	// 시그널 처리
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	osSignal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// 스케줄러 시작
 	go func() {
