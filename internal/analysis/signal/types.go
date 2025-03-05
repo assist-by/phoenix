@@ -12,6 +12,8 @@ const (
 	NoSignal SignalType = iota
 	Long
 	Short
+	PendingLong  // MACD 상향 돌파 후 SAR 반전 대기 상태
+	PendingShort // MACD 하향돌파 후 SAR 반전 대기 상태
 )
 
 func (s SignalType) String() string {
@@ -22,6 +24,10 @@ func (s SignalType) String() string {
 		return "Long"
 	case Short:
 		return "Short"
+	case PendingLong:
+		return "PendingLong"
+	case PendingShort:
+		return "PendingShort"
 	default:
 		return "Unknown"
 	}
@@ -54,17 +60,22 @@ type Signal struct {
 
 // SymbolState는 각 심볼별 상태를 관리합니다
 type SymbolState struct {
-	PrevMACD   float64
-	PrevSignal float64
-	LastSignal *Signal
+	PrevMACD       float64    // 이전 MACD 값
+	PrevSignal     float64    // 이전 Signal 값
+	PrevHistogram  float64    // 이전 히스토그램 값
+	LastSignal     *Signal    // 마지막 발생 시그널
+	PendingSignal  SignalType // 대기중인 시그널 타입
+	WaitedCandles  int        // 대기한 캔들 수
+	MaxWaitCandles int        // 최대 대기 캔들 수
 }
 
 // Detector는 시그널 감지기를 정의합니다
 type Detector struct {
-	states        map[string]*SymbolState
-	emaLength     int     // EMA 기간
-	stopLossPct   float64 // 손절 비율
-	takeProfitPct float64 // 익절 비율
-	minHistogram  float64 // MACD 히스토그램 최소값
-	mu            sync.RWMutex
+	states         map[string]*SymbolState
+	emaLength      int     // EMA 기간
+	stopLossPct    float64 // 손절 비율
+	takeProfitPct  float64 // 익절 비율
+	minHistogram   float64 // MACD 히스토그램 최소값
+	maxWaitCandles int     // 기본 최대 대기 캔들 수
+	mu             sync.RWMutex
 }
