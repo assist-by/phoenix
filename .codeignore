@@ -6,3 +6,8 @@ go.sum
 **/*.exe
 .codeignore
 **/phoenix_v*
+
+backtest/myenv
+**/__pycache__
+
+*.log

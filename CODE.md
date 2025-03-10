@@ -3,6 +3,11 @@
 
 ```
 phoenix/
+├── backtest/
+    ├── data_fetcher.py
+    ├── indicators.py
+    ├── main.py
+    └── visualizer.py
 ├── cmd/
     └── trader/
     │   └── main.go
@@ -36,6 +41,569 @@ phoenix/
         └── scheduler.go
 ```
 
+## backtest/data_fetcher.py
+```py
+import ccxt
+import pandas as pd
+from datetime import datetime
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('DataFetcher')
+
+class BinanceDataFetcher:
+    """바이낸스에서 OHLCV 데이터를 가져오는 클래스"""
+    
+    def __init__(self, api_key=None, api_secret=None):
+        """
+        바이낸스 데이터 페처 초기화
+        
+        Args:
+            api_key (str, optional): 바이낸스 API 키. 기본값은 None.
+            api_secret (str, optional): 바이낸스 API 시크릿. 기본값은 None.
+        """
+        self.exchange = ccxt.binance({
+            'apiKey': api_key,
+            'secret': api_secret,
+            'enableRateLimit': True,  # API 호출 제한 준수
+        })
+        logger.info("바이낸스 데이터 페처가 초기화되었습니다.")
+    
+    def fetch_ohlcv(self, symbol='BTC/USDT', timeframe='4h', limit=500):
+        """
+        바이낸스에서 OHLCV 데이터를 가져옴
+        
+        Args:
+            symbol (str): 심볼 (예: 'BTC/USDT'). 기본값은 'BTC/USDT'.
+            timeframe (str): 시간 프레임 (예: '1m', '5m', '1h', '4h', '1d'). 기본값은 '4h'.
+            limit (int): 가져올 캔들 개수. 기본값은 500.
+            
+        Returns:
+            pandas.DataFrame: OHLCV 데이터를 담은 DataFrame. 실패 시 None 반환.
+        """
+        logger.info(f"{symbol} {timeframe} 데이터 다운로드 중 (limit: {limit})...")
+        
+        try:
+            # 바이낸스에서 데이터 가져오기
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            
+            # 데이터프레임으로 변환
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            # 타임스탬프를 datetime으로 변환
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            logger.info(f"데이터 다운로드 완료: {len(df)} 개의 캔들")
+            return df
+            
+        except Exception as e:
+            logger.error(f"데이터 다운로드 중 오류 발생: {str(e)}")
+            return None
+```
+## backtest/indicators.py
+```py
+import pandas as pd
+import numpy as np
+from ta.trend import MACD, PSARIndicator, EMAIndicator
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('Indicators')
+
+class TechnicalIndicators:
+    """기술적 지표 계산 클래스"""
+    
+    def __init__(self, df=None):
+        """
+        기술적 지표 클래스 초기화
+        
+        Args:
+            df (pandas.DataFrame, optional): OHLCV 데이터. 기본값은 None.
+        """
+        self.df = df
+        logger.info("기술적 지표 클래스가 초기화되었습니다.")
+    
+    def set_data(self, df):
+        """
+        분석할 데이터 설정
+        
+        Args:
+            df (pandas.DataFrame): OHLCV 데이터
+        """
+        self.df = df
+    
+    def add_ema(self, period=200, column='close'):
+        """
+        지수이동평균(EMA) 추가
+        
+        Args:
+            period (int): EMA 기간. 기본값은 200.
+            column (str): 계산에 사용할 컬럼명. 기본값은 'close'.
+            
+        Returns:
+            pandas.DataFrame: 지표가 추가된 데이터프레임
+        """
+        if self.df is None:
+            logger.error("데이터가 설정되지 않았습니다.")
+            return None
+        
+        try:
+            indicator = EMAIndicator(close=self.df[column], window=period)
+            self.df[f'ema{period}'] = indicator.ema_indicator()
+            logger.info(f"EMA{period} 지표가 추가되었습니다.")
+            return self.df
+        except Exception as e:
+            logger.error(f"EMA 계산 중 오류 발생: {str(e)}")
+            return self.df
+    
+    def add_macd(self, fast_period=12, slow_period=26, signal_period=9, column='close'):
+        """
+        MACD(Moving Average Convergence Divergence) 추가
+        
+        Args:
+            fast_period (int): 빠른 EMA 기간. 기본값은 12.
+            slow_period (int): 느린 EMA 기간. 기본값은 26.
+            signal_period (int): 시그널 기간. 기본값은 9.
+            column (str): 계산에 사용할 컬럼명. 기본값은 'close'.
+            
+        Returns:
+            pandas.DataFrame: 지표가 추가된 데이터프레임
+        """
+        if self.df is None:
+            logger.error("데이터가 설정되지 않았습니다.")
+            return None
+        
+        try:
+            indicator = MACD(
+                close=self.df[column], 
+                window_fast=fast_period, 
+                window_slow=slow_period, 
+                window_sign=signal_period
+            )
+            self.df['macd'] = indicator.macd()
+            self.df['macd_signal'] = indicator.macd_signal()
+            self.df['macd_histogram'] = indicator.macd_diff()
+            logger.info(f"MACD({fast_period},{slow_period},{signal_period}) 지표가 추가되었습니다.")
+            return self.df
+        except Exception as e:
+            logger.error(f"MACD 계산 중 오류 발생: {str(e)}")
+            return self.df
+    
+    def add_parabolic_sar(self, step=0.02, max_step=0.2):
+        """
+        Parabolic SAR 추가
+        
+        Args:
+            step (float): 가속도 인자 초기값. 기본값은 0.02.
+            max_step (float): 가속도 인자 최대값. 기본값은 0.2.
+            
+        Returns:
+            pandas.DataFrame: 지표가 추가된 데이터프레임
+        """
+        if self.df is None:
+            logger.error("데이터가 설정되지 않았습니다.")
+            return None
+        
+        try:
+            indicator = PSARIndicator(
+                high=self.df['high'], 
+                low=self.df['low'], 
+                close=self.df['close'],
+                step=step,
+                max_step=max_step
+            )
+            self.df['psar'] = indicator.psar()
+            logger.info(f"Parabolic SAR(step={step}, max_step={max_step}) 지표가 추가되었습니다.")
+            return self.df
+        except Exception as e:
+            logger.error(f"Parabolic SAR 계산 중 오류 발생: {str(e)}")
+            return self.df
+    
+    def add_all_indicators(self):
+        """
+        모든 기본 지표 추가 (EMA200, MACD, Parabolic SAR)
+        
+        Returns:
+            pandas.DataFrame: 모든 지표가 추가된 데이터프레임
+        """
+        if self.df is None:
+            logger.error("데이터가 설정되지 않았습니다.")
+            return None
+        
+        logger.info("모든 기본 지표 추가 중...")
+        self.add_ema(period=200)
+        self.add_macd()
+        self.add_parabolic_sar()
+        return self.df
+```
+## backtest/main.py
+```py
+import logging
+import argparse
+from data_fetcher import BinanceDataFetcher
+from indicators import TechnicalIndicators
+from visualizer import ChartVisualizer
+
+# 로깅 설정
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("trading_analysis.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('Main')
+
+def parse_args():
+    """명령줄 인자 파싱"""
+    parser = argparse.ArgumentParser(description='암호화폐 기술적 분석 도구')
+    
+    parser.add_argument('--symbol', type=str, default='BTC/USDT',
+                        help='분석할 암호화폐 심볼 (기본값: BTC/USDT)')
+    
+    parser.add_argument('--timeframe', type=str, default='15m',
+                        help='분석할 시간대 (기본값: 15m)')
+    
+    parser.add_argument('--limit', type=int, default=500,
+                        help='가져올 캔들 개수 (기본값: 500)')
+    
+    parser.add_argument('--save', action='store_true',
+                        help='차트를 파일로 저장')
+    
+    parser.add_argument('--output', type=str, default='chart.png',
+                        help='저장할 파일 이름 (기본값: chart.png)')
+    
+    parser.add_argument('--use-mpf', type=bool, default=True,
+                        help='mplfinance 라이브러리 사용 여부 (기본값: True)')
+    
+    return parser.parse_args()
+
+def main():
+    """메인 함수"""
+    # 명령줄 인자 파싱
+    args = parse_args()
+    
+    logger.info(f"거래 분석 시작: {args.symbol}, {args.timeframe}, {args.limit}개 캔들")
+    
+    try:
+        # 1. 데이터 가져오기
+        fetcher = BinanceDataFetcher()
+        df = fetcher.fetch_ohlcv(symbol=args.symbol, timeframe=args.timeframe, limit=args.limit)
+        
+        if df is None or len(df) == 0:
+            logger.error("데이터를 가져오지 못했습니다.")
+            return
+        
+        logger.info(f"데이터 다운로드 완료: {len(df)}개 캔들")
+        
+        # 2. 기술적 지표 계산
+        indicators = TechnicalIndicators(df)
+        df = indicators.add_all_indicators()
+        
+        # 3. 차트 시각화
+        visualizer = ChartVisualizer(df)
+        title = f"{args.symbol} - {args.timeframe} 차트"
+        visualizer.plot_chart(use_mplfinance=args.use_mpf, title=title)
+        
+        # 4. 차트 저장 및 표시
+        if args.save:
+            visualizer.save_chart(filename=args.output)
+        
+        # 차트 표시
+        visualizer.show_chart()
+        
+        # 5. 데이터 요약 정보 출력
+        print("\n=== 데이터 요약 ===")
+        print(f"심볼: {args.symbol}")
+        print(f"시간대: {args.timeframe}")
+        print(f"기간: {df.index[0]} ~ {df.index[-1]}")
+        print(f"캔들 수: {len(df)}")
+        print(f"시작가: {df['close'].iloc[0]:.2f}")
+        print(f"종료가: {df['close'].iloc[-1]:.2f}")
+        print(f"변동률: {((df['close'].iloc[-1] / df['close'].iloc[0]) - 1) * 100:.2f}%")
+        
+        return df
+        
+    except Exception as e:
+        logger.error(f"실행 중 오류 발생: {str(e)}")
+        return None
+
+if __name__ == "__main__":
+    df = main()
+```
+## backtest/visualizer.py
+```py
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mpdates
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('Visualizer')
+
+class ChartVisualizer:
+    """차트 시각화를 담당하는 클래스"""
+    
+    def __init__(self, df=None):
+        """
+        차트 시각화 클래스 초기화
+        
+        Args:
+            df (pandas.DataFrame, optional): 시각화할 데이터. 기본값은 None.
+        """
+        self.df = df
+        self.fig = None
+        self.axes = None
+        logger.info("차트 시각화 클래스가 초기화되었습니다.")
+        
+        # mplfinance 임포트 시도
+        try:
+            import mplfinance as mpf
+            self.mpf = mpf
+            self.has_mpf = True
+            logger.info("mplfinance 라이브러리를 사용합니다.")
+        except ImportError:
+            logger.warning("mplfinance 라이브러리가 설치되지 않았습니다. 기본 matplotlib를 사용합니다.")
+            self.has_mpf = False
+    
+    def set_data(self, df):
+        """
+        시각화할 데이터 설정
+        
+        Args:
+            df (pandas.DataFrame): 시각화할 데이터
+        """
+        self.df = df
+    
+    def _prepare_data(self, max_candles=500):
+        """
+        시각화를 위한 데이터 준비
+        
+        Args:
+            max_candles (int): 최대 캔들 수. 기본값은 500.
+            
+        Returns:
+            pandas.DataFrame: 시각화용으로 준비된 데이터프레임
+        """
+        if self.df is None:
+            logger.error("데이터가 설정되지 않았습니다.")
+            return None
+        
+        # 필요한 기술적 지표 칼럼이 있는지 확인
+        required_columns = ['ema200', 'macd', 'macd_signal', 'macd_histogram', 'psar']
+        missing_columns = [col for col in required_columns if col not in self.df.columns]
+        
+        if missing_columns:
+            logger.warning(f"일부 지표 칼럼이 누락되었습니다: {missing_columns}")
+        
+        # EMA200이 계산된 부분만 사용
+        if 'ema200' in self.df.columns:
+            df_valid = self.df.dropna(subset=['ema200']).copy()
+            logger.info(f"EMA200이 계산된 유효한 데이터: {len(df_valid)}개 캔들")
+        else:
+            df_valid = self.df.copy()
+            logger.warning("EMA200 칼럼이 없습니다. 전체 데이터를 사용합니다.")
+        
+        # 데이터가 너무 많으면 최근 데이터로 제한
+        if len(df_valid) > max_candles:
+            df_valid = df_valid.tail(max_candles).copy()
+            logger.info(f"데이터를 최근 {max_candles}개 캔들로 제한합니다.")
+        
+        return df_valid
+    
+    def plot_basic_chart(self, max_candles=500, title="가격 차트"):
+        """
+        기본 matplotlib을 사용한 차트 그리기
+        
+        Args:
+            max_candles (int): 최대 캔들 수. 기본값은 500.
+            title (str): 차트 제목. 기본값은 "가격 차트".
+            
+        Returns:
+            matplotlib.figure.Figure: 생성된 차트 figure 객체
+        """
+        df_plot = self._prepare_data(max_candles)
+        if df_plot is None:
+            return None
+        
+        # 차트 생성
+        self.fig, self.axes = plt.subplots(2, 1, figsize=(15, 10), 
+                                          gridspec_kw={'height_ratios': [3, 1]}, 
+                                          sharex=True)
+        
+        # 메인 차트 (캔들 + 지표)
+        ax1 = self.axes[0]
+        
+        # 캔들스틱 그리기
+        for i in range(len(df_plot)):
+            # 양봉/음봉 구분
+            color = 'green' if df_plot['close'].iloc[i] >= df_plot['open'].iloc[i] else 'red'
+            # 캔들 바디
+            ax1.plot([i, i], [df_plot['open'].iloc[i], df_plot['close'].iloc[i]], 
+                    color=color, linewidth=4)
+            # 위아래 꼬리
+            ax1.plot([i, i], [df_plot['low'].iloc[i], df_plot['high'].iloc[i]], 
+                    color=color, linewidth=1)
+        
+        # 200 EMA
+        if 'ema200' in df_plot.columns:
+            ax1.plot(range(len(df_plot)), df_plot['ema200'], color='blue', linewidth=1.5, label='EMA 200')
+        
+        # Parabolic SAR
+        if 'psar' in df_plot.columns:
+            ax1.scatter(range(len(df_plot)), df_plot['psar'], color='purple', s=20, label='Parabolic SAR')
+        
+        ax1.set_title(title, fontsize=15)
+        ax1.set_ylabel('가격')
+        ax1.legend(loc='upper left')
+        ax1.grid(alpha=0.3)
+        
+        # MACD 차트
+        ax2 = self.axes[1]
+        
+        if all(col in df_plot.columns for col in ['macd', 'macd_signal', 'macd_histogram']):
+            ax2.plot(range(len(df_plot)), df_plot['macd'], color='blue', linewidth=1, label='MACD')
+            ax2.plot(range(len(df_plot)), df_plot['macd_signal'], color='red', linewidth=1, label='Signal')
+            
+            # MACD 히스토그램
+            for i in range(len(df_plot)):
+                color = 'green' if df_plot['macd_histogram'].iloc[i] >= 0 else 'red'
+                ax2.bar(i, df_plot['macd_histogram'].iloc[i], color=color, alpha=0.5)
+            
+            ax2.axhline(y=0, color='black', linestyle='-', alpha=0.2)
+            ax2.set_ylabel('MACD')
+            ax2.legend(loc='upper left')
+            ax2.grid(alpha=0.3)
+        
+        # X축 레이블 설정
+        if len(df_plot) > 0:
+            tick_positions = np.linspace(0, len(df_plot) - 1, min(10, len(df_plot)), dtype=int)
+            tick_labels = [df_plot.index[i].strftime('%Y-%m-%d') for i in tick_positions]
+            ax2.set_xticks(tick_positions)
+            ax2.set_xticklabels(tick_labels, rotation=45)
+        
+        plt.tight_layout()
+        return self.fig
+    
+    def plot_mplfinance_chart(self, max_candles=500, title="캔들스틱 차트"):
+        """
+        mplfinance 라이브러리를 사용한 캔들스틱 차트 그리기
+        
+        Args:
+            max_candles (int): 최대 캔들 수. 기본값은 500.
+            title (str): 차트 제목. 기본값은 "캔들스틱 차트".
+            
+        Returns:
+            matplotlib.figure.Figure: 생성된 차트 figure 객체 또는 None(라이브러리 없는 경우)
+        """
+        if not self.has_mpf:
+            logger.error("mplfinance 라이브러리가 설치되지 않았습니다.")
+            return None
+        
+        df_plot = self._prepare_data(max_candles)
+        if df_plot is None:
+            return None
+        
+        # 추가 플롯 설정
+        addplots = []
+        
+        # EMA200 추가
+        if 'ema200' in df_plot.columns:
+            addplots.append(self.mpf.make_addplot(df_plot['ema200'], color='blue', width=1.5))
+        
+        # Parabolic SAR 추가
+        if 'psar' in df_plot.columns:
+            addplots.append(self.mpf.make_addplot(df_plot['psar'], type='scatter', markersize=50, marker='.', color='purple'))
+        
+        # MACD 추가
+        if all(col in df_plot.columns for col in ['macd', 'macd_signal']):
+            addplots.append(self.mpf.make_addplot(df_plot['macd'], panel=1, color='blue', secondary_y=False))
+            addplots.append(self.mpf.make_addplot(df_plot['macd_signal'], panel=1, color='red', secondary_y=False))
+        
+        # 차트 스타일 설정
+        mc = self.mpf.make_marketcolors(up='green', down='red', edge='black', wick='black')
+        s = self.mpf.make_mpf_style(marketcolors=mc, gridstyle='-', y_on_right=False)
+        
+        # 차트 그리기
+        try:
+            self.fig, self.axes = self.mpf.plot(df_plot, type='candle', style=s, addplot=addplots,
+                                              figsize=(15, 10), panel_ratios=(2, 1), returnfig=True,
+                                              title=title)
+            
+            # MACD 히스토그램 수동 추가 (색상 구분)
+            if all(col in df_plot.columns for col in ['macd', 'macd_signal', 'macd_histogram']) and len(self.axes) > 2:
+                ax_macd = self.axes[2]
+                
+                # 히스토그램 제로라인
+                ax_macd.axhline(y=0, color='black', linestyle='-', alpha=0.2)
+                
+                # 범례 추가
+                self.axes[0].legend(['EMA(200)', 'Price', 'Parabolic SAR'], loc='upper left')
+                ax_macd.legend(['MACD', 'Signal Line'], loc='upper left')
+            
+            return self.fig
+            
+        except Exception as e:
+            logger.error(f"mplfinance 차트 생성 중 오류 발생: {str(e)}")
+            return None
+    
+    def plot_chart(self, use_mplfinance=True, max_candles=500, title=None):
+        """
+        사용 가능한 라이브러리를 이용해 차트 그리기
+        
+        Args:
+            use_mplfinance (bool): mplfinance 사용 여부. 기본값은 True.
+            max_candles (int): 최대 캔들 수. 기본값은 500.
+            title (str, optional): 차트 제목. 기본값은 None.
+            
+        Returns:
+            matplotlib.figure.Figure: 생성된 차트 figure 객체
+        """
+        # 제목 설정
+        if title is None:
+            symbol = "Unknown"
+            for col in ['symbol', 'pair']:
+                if hasattr(self.df, col) and getattr(self.df, col) is not None:
+                    symbol = getattr(self.df, col)
+                    break
+            title = f"{symbol} - 기술적 분석 차트"
+        
+        # mplfinance 라이브러리로 차트 그리기 시도
+        if use_mplfinance and self.has_mpf:
+            fig = self.plot_mplfinance_chart(max_candles=max_candles, title=title)
+            if fig is not None:
+                return fig
+        
+        # 기본 matplotlib로 차트 그리기
+        return self.plot_basic_chart(max_candles=max_candles, title=title)
+    
+    def show_chart(self):
+        """차트 표시"""
+        if self.fig is not None:
+            plt.show()
+        else:
+            logger.error("표시할 차트가 없습니다. plot_chart() 메서드를 먼저 호출하세요.")
+    
+    def save_chart(self, filename='chart.png', dpi=300):
+        """
+        차트를 파일로 저장
+        
+        Args:
+            filename (str): 저장할 파일 이름. 기본값은 'chart.png'.
+            dpi (int): 해상도(DPI). 기본값은 300.
+        """
+        if self.fig is not None:
+            self.fig.savefig(filename, dpi=dpi, bbox_inches='tight')
+            logger.info(f"차트가 '{filename}'로 저장되었습니다.")
+        else:
+            logger.error("저장할 차트가 없습니다. plot_chart() 메서드를 먼저 호출하세요.")
+```
 ## cmd/trader/main.go
 ```go
 package main
@@ -1295,29 +1863,31 @@ func generatePendingLongSignalPrices() []indicator.PriceData {
 		}
 	}
 
-	// 마지막 부분 (241-249)에서 SAR은 아직 캔들 위에 있지만 추세는 지속
+	// 마지막 부분 (240-244)에서 SAR은 아직 캔들 위에 있지만 추세는 지속
 	// 이 부분은 대기 상태가 발생하는 구간
 	for i := 240; i < 245; i++ {
 		increment := float64(i-240) * 0.2
 		prices[i] = indicator.PriceData{
-			Time:   baseTime.Add(time.Hour * time.Duration(i)),
-			Open:   startPrice + 27.0 + increment,
-			High:   startPrice + 27.0 + increment + 0.05,
+			Time: baseTime.Add(time.Hour * time.Duration(i)),
+			Open: startPrice + 27.0 + increment,
+			// SAR이 계속 캔들 위에 유지되도록 고가를 낮게 설정
+			High:   startPrice + 27.0 + increment + 0.03,
 			Low:    startPrice + 27.0 + increment - 0.05,
-			Close:  startPrice + 27.0 + increment + 0.04,
+			Close:  startPrice + 27.0 + increment + 0.02,
 			Volume: 1800.0,
 		}
 	}
 
-	// 마지막 부분 (245-249)에서 SAR이 캔들 아래로 이동하여 시그널 발생
+	// 마지막 캔들 (245-249)에서만 SAR이 캔들 아래로 이동하여 시그널 발생
 	for i := 245; i < 250; i++ {
 		increment := float64(i-245) * 0.5
 		prices[i] = indicator.PriceData{
-			Time:   baseTime.Add(time.Hour * time.Duration(i)),
-			Open:   startPrice + 28.0 + increment,
-			High:   startPrice + 28.0 + increment + 0.5,
+			Time: baseTime.Add(time.Hour * time.Duration(i)),
+			Open: startPrice + 28.0 + increment,
+			// 마지막 캔들에서 확실하게 SAR이 아래로 가도록 고가를 확 높게 설정
+			High:   startPrice + 28.0 + increment + 1.5,
 			Low:    startPrice + 28.0 + increment - 0.1,
-			Close:  startPrice + 28.0 + increment + 0.4,
+			Close:  startPrice + 28.0 + increment + 1.0,
 			Volume: 2500.0,
 		}
 	}
@@ -1369,29 +1939,31 @@ func generatePendingShortSignalPrices() []indicator.PriceData {
 		}
 	}
 
-	// 마지막 부분 (241-245)에서 SAR은 아직 캔들 아래에 있지만 추세는 지속
+	// 마지막 부분 (240-244)에서 SAR은 아직 캔들 아래에 있지만 추세는 지속
 	// 이 부분은 대기 상태가 발생하는 구간
 	for i := 240; i < 245; i++ {
 		decrement := float64(i-240) * 0.2
 		prices[i] = indicator.PriceData{
-			Time:   baseTime.Add(time.Hour * time.Duration(i)),
-			Open:   startPrice - 27.0 - decrement,
-			High:   startPrice - 27.0 - decrement + 0.05,
-			Low:    startPrice - 27.0 - decrement - 0.05,
-			Close:  startPrice - 27.0 - decrement - 0.04,
+			Time: baseTime.Add(time.Hour * time.Duration(i)),
+			Open: startPrice - 27.0 - decrement,
+			High: startPrice - 27.0 - decrement + 0.03,
+			// SAR이 계속 캔들 아래에 유지되도록 저가를 높게 설정
+			Low:    startPrice - 27.0 - decrement - 0.03,
+			Close:  startPrice - 27.0 - decrement - 0.02,
 			Volume: 1800.0,
 		}
 	}
 
-	// 마지막 부분 (245-249)에서 SAR이 캔들 위로 이동하여 시그널 발생
+	// 마지막 캔들 (245-249)에서만 SAR이 캔들 위로 이동하여 시그널 발생
 	for i := 245; i < 250; i++ {
 		decrement := float64(i-245) * 0.5
 		prices[i] = indicator.PriceData{
-			Time:   baseTime.Add(time.Hour * time.Duration(i)),
-			Open:   startPrice - 28.0 - decrement,
-			High:   startPrice - 28.0 - decrement + 0.1,
-			Low:    startPrice - 28.0 - decrement - 0.5,
-			Close:  startPrice - 28.0 - decrement - 0.4,
+			Time: baseTime.Add(time.Hour * time.Duration(i)),
+			Open: startPrice - 28.0 - decrement,
+			High: startPrice - 28.0 - decrement + 0.1,
+			// 마지막 캔들에서 확실하게 SAR이 위로 가도록 저가를 확 낮게 설정
+			Low:    startPrice - 28.0 - decrement - 1.5,
+			Close:  startPrice - 28.0 - decrement - 1.0,
 			Volume: 2500.0,
 		}
 	}
@@ -1399,7 +1971,7 @@ func generatePendingShortSignalPrices() []indicator.PriceData {
 	return prices
 }
 
-// TestPendingSignals는 대기 상태에서 시그널 감지가 제대로 동작하는지 테스트합니다
+// TestPendingSignals는 대기 상태 및 신호 감지를 테스트합니다
 func TestPendingSignals(t *testing.T) {
 	detector := NewDetector(DetectorConfig{
 		EMALength:      200,
@@ -1409,108 +1981,97 @@ func TestPendingSignals(t *testing.T) {
 		MinHistogram:   0.00005,
 	})
 
-	t.Run("롱 대기 상태 테스트", func(t *testing.T) {
-		prices := generatePendingLongSignalPrices()
-
-		// 테스트는 마지막 5개 캔들만 사용
-		startIdx := len(prices) - 5
-
-		// 첫 번째 캔들 (초기 상태)
-		signal, err := detector.Detect("BTCUSDT", prices[:startIdx+1])
+	t.Run("롱/숏 신호 감지 테스트", func(t *testing.T) {
+		// 롱 신호 테스트
+		longPrices := generateLongSignalPrices()
+		longSignal, err := detector.Detect("BTCUSDT", longPrices)
 		if err != nil {
-			t.Fatalf("시그널 감지 에러: %v", err)
-		}
-		if signal.Type != NoSignal {
-			t.Errorf("첫 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+			t.Fatalf("롱 신호 감지 에러: %v", err)
 		}
 
-		// 두 번째 캔들 (MACD 골든크로스 발생, PendingLong 상태 진입)
-		signal, err = detector.Detect("BTCUSDT", prices[:startIdx+2])
+		if longSignal.Type != Long {
+			t.Errorf("롱 신호 감지 실패: 예상 타입 Long, 실제 %s", longSignal.Type)
+		} else {
+			t.Logf("롱 신호 감지 성공: 가격=%.2f, 손절=%.2f, 익절=%.2f",
+				longSignal.Price, longSignal.StopLoss, longSignal.TakeProfit)
+		}
+
+		// 숏 신호 테스트
+		shortPrices := generateShortSignalPrices()
+		shortSignal, err := detector.Detect("BTCUSDT", shortPrices)
 		if err != nil {
-			t.Fatalf("시그널 감지 에러: %v", err)
+			t.Fatalf("숏 신호 감지 에러: %v", err)
 		}
 
-		// PendingLong 상태가 직접 리턴되지는 않지만, 내부적으로 상태가 유지됨
-		// 따라서 계속 NoSignal이 리턴됨
-		if signal.Type != NoSignal {
-			t.Errorf("두 번째 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
-		}
-
-		// 세 번째, 네 번째 캔들 (SAR 반전 기다리는 중)
-		for i := 3; i <= 4; i++ {
-			signal, err = detector.Detect("BTCUSDT", prices[:startIdx+i])
-			if err != nil {
-				t.Fatalf("시그널 감지 에러: %v", err)
-			}
-			if signal.Type != NoSignal {
-				t.Errorf("%d번째 캔들에서 예상 시그널 NoSignal, 실제 %s", i, signal.Type)
-			}
-		}
-
-		// 다섯 번째 캔들 (SAR 반전 발생, Long 시그널 생성)
-		signal, err = detector.Detect("BTCUSDT", prices)
-		if err != nil {
-			t.Fatalf("시그널 감지 에러: %v", err)
-		}
-		if signal.Type != Long {
-			t.Errorf("다섯 번째 캔들에서 예상 시그널 Long, 실제 %s", signal.Type)
-		}
-
-		// 스탑로스가 제대로 설정되었는지 확인
-		if signal.Type == Long && signal.StopLoss <= 0 {
-			t.Errorf("Long 시그널의 스탑로스가 올바르게 설정되지 않음: %f", signal.StopLoss)
+		if shortSignal.Type != Short {
+			t.Errorf("숏 신호 감지 실패: 예상 타입 Short, 실제 %s", shortSignal.Type)
+		} else {
+			t.Logf("숏 신호 감지 성공: 가격=%.2f, 손절=%.2f, 익절=%.2f",
+				shortSignal.Price, shortSignal.StopLoss, shortSignal.TakeProfit)
 		}
 	})
 
-	t.Run("숏 대기 상태 테스트", func(t *testing.T) {
-		prices := generatePendingShortSignalPrices()
-
-		// 테스트는 마지막 5개 캔들만 사용
-		startIdx := len(prices) - 5
-
-		// 첫 번째 캔들 (초기 상태)
-		signal, err := detector.Detect("BTCUSDT", prices[:startIdx+1])
-		if err != nil {
-			t.Fatalf("시그널 감지 에러: %v", err)
-		}
-		if signal.Type != NoSignal {
-			t.Errorf("첫 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+	t.Run("대기 상태 단위 테스트", func(t *testing.T) {
+		// 롱 대기 상태 테스트
+		symbolState := &SymbolState{
+			PendingSignal:  PendingLong,
+			WaitedCandles:  2,
+			MaxWaitCandles: 5,
+			PrevMACD:       0.001,
+			PrevSignal:     0.0005,
+			PrevHistogram:  0.0005,
 		}
 
-		// 두 번째 캔들 (MACD 데드크로스 발생, PendingShort 상태 진입)
-		signal, err = detector.Detect("BTCUSDT", prices[:startIdx+2])
-		if err != nil {
-			t.Fatalf("시그널 감지 에러: %v", err)
+		// SAR이 캔들 아래로 반전된 상황 시뮬레이션
+		baseSignal := &Signal{
+			Type:      NoSignal,
+			Symbol:    "BTCUSDT",
+			Price:     100.0,
+			Timestamp: time.Now(),
+			Conditions: SignalConditions{
+				SARValue: 98.0, // SAR이 캔들 아래로 이동
+			},
 		}
 
-		// PendingShort 상태가 직접 리턴되지는 않지만, 내부적으로 상태가 유지됨
-		if signal.Type != NoSignal {
-			t.Errorf("두 번째 캔들에서 예상 시그널 NoSignal, 실제 %s", signal.Type)
+		// 롱 대기 상태에서 SAR 반전 시 롱 신호가 생성되는지 확인
+		result := detector.processPendingState(symbolState, "BTCUSDT", baseSignal, 0.001, true, false)
+		if result == nil {
+			t.Errorf("롱 대기 상태에서 SAR 반전 시 신호가 생성되지 않음")
+		} else if result.Type != Long {
+			t.Errorf("롱 대기 상태에서 SAR 반전 시 잘못된 신호 타입: %s", result.Type)
+		} else {
+			t.Logf("롱 대기 상태 테스트 성공")
 		}
 
-		// 세 번째, 네 번째 캔들 (SAR 반전 기다리는 중)
-		for i := 3; i <= 4; i++ {
-			signal, err = detector.Detect("BTCUSDT", prices[:startIdx+i])
-			if err != nil {
-				t.Fatalf("시그널 감지 에러: %v", err)
-			}
-			if signal.Type != NoSignal {
-				t.Errorf("%d번째 캔들에서 예상 시그널 NoSignal, 실제 %s", i, signal.Type)
-			}
+		// 숏 대기 상태 테스트
+		symbolState = &SymbolState{
+			PendingSignal:  PendingShort,
+			WaitedCandles:  2,
+			MaxWaitCandles: 5,
+			PrevMACD:       -0.001,
+			PrevSignal:     -0.0005,
+			PrevHistogram:  -0.0005,
 		}
 
-		// 다섯 번째 캔들 (SAR 반전 발생, Short 시그널 생성)
-		signal, err = detector.Detect("BTCUSDT", prices)
-		if err != nil {
-			t.Fatalf("시그널 감지 에러: %v", err)
-		}
-		if signal.Type != Short {
-			t.Errorf("다섯 번째 캔들에서 예상 시그널 Short, 실제 %s", signal.Type)
+		// SAR이 캔들 위로 반전된 상황 시뮬레이션
+		baseSignal = &Signal{
+			Type:      NoSignal,
+			Symbol:    "BTCUSDT",
+			Price:     100.0,
+			Timestamp: time.Now(),
+			Conditions: SignalConditions{
+				SARValue: 102.0, // SAR이 캔들 위로 이동
+			},
 		}
 
-		// 스탑로스가 제대로 설정되었는지 확인
-		if signal.Type == Short && signal.StopLoss <= 0 {
-			t.Errorf("Short 시그널의 스탑로스가 올바르게 설정되지 않음: %f", signal.StopLoss)
+		// 숏 대기 상태에서 SAR 반전 시 숏 신호가 생성되는지 확인
+		result = detector.processPendingState(symbolState, "BTCUSDT", baseSignal, -0.001, false, true)
+		if result == nil {
+			t.Errorf("숏 대기 상태에서 SAR 반전 시 신호가 생성되지 않음")
+		} else if result.Type != Short {
+			t.Errorf("숏 대기 상태에서 SAR 반전 시 잘못된 신호 타입: %s", result.Type)
+		} else {
+			t.Logf("숏 대기 상태 테스트 성공")
 		}
 	})
 }

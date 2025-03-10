@@ -11,3 +11,6 @@ dist/
 
 # 기타
 *.log
+
+backtest/myenv
+**/__pycache__
