@@ -465,9 +465,12 @@ func (c *Client) SetPositionMode(ctx context.Context, hedgeMode bool) error {
 		if errors.As(err, &apiErr) && apiErr.Code == ErrPositionModeNoChange {
 			return nil // 이미 원하는 모드로 설정된 경우
 		}
+		// 문자열 검사 추가
+		if strings.Contains(err.Error(), "No need to change position side") {
+			return nil
+		}
 		return fmt.Errorf("포지션 모드 설정 실패: %w", err)
 	}
-
 	return nil
 }
 
