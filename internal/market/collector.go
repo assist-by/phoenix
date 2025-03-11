@@ -147,13 +147,6 @@ func (c *Collector) Collect(ctx context.Context) error {
 				}
 
 				if s.Type != signal.NoSignal {
-					// // 매매 실행
-					// if err := c.executeSignalTrade(ctx, s); err != nil {
-					// 	c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
-					// } else {
-					// 	log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
-					// 		s.Symbol, s.Type.String())
-					// }
 
 					// 진입 가능 여부 확인
 					result, err := c.checkEntryAvailable(ctx, s)
@@ -165,35 +158,42 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 					}
 
-					if !result.Available {
-						log.Printf("진입 불가: %s", result.Reason)
-
-					}
-
-					balances, err := c.client.GetBalance(ctx)
-					if err != nil {
-						return fmt.Errorf("잔고 조회 실패: %w", err)
-					}
-					usdtBalance := balances["USDT"].Available
-
-					// TradeInfo 생성
-					tradeInfo := notification.TradeInfo{
-						Symbol:        s.Symbol,
-						PositionType:  s.Type.String(),
-						PositionValue: result.PositionValue,
-						Quantity:      result.Quantity,
-						EntryPrice:    s.Price,
-						StopLoss:      s.StopLoss,
-						TakeProfit:    s.TakeProfit,
-						Balance:       usdtBalance,
-						Leverage:      5,
-					}
-
-					if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
-						log.Printf("거래 정보 알림 전송 실패: %v", err)
-						if err := c.discord.SendError(err); err != nil {
-							log.Printf("에러 알림 전송 실패: %v", err)
+					if result.Available {
+						// 매매 실행
+						if err := c.executeSignalTrade(ctx, s); err != nil {
+							c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
+						} else {
+							log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
+								s.Symbol, s.Type.String())
 						}
+						balances, err := c.client.GetBalance(ctx)
+						if err != nil {
+							return fmt.Errorf("잔고 조회 실패: %w", err)
+						}
+						usdtBalance := balances["USDT"].Available
+
+						// TradeInfo 생성
+						tradeInfo := notification.TradeInfo{
+							Symbol:        s.Symbol,
+							PositionType:  s.Type.String(),
+							PositionValue: result.PositionValue,
+							Quantity:      result.Quantity,
+							EntryPrice:    s.Price,
+							StopLoss:      s.StopLoss,
+							TakeProfit:    s.TakeProfit,
+							Balance:       usdtBalance,
+							Leverage:      5,
+						}
+
+						if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
+							log.Printf("거래 정보 알림 전송 실패: %v", err)
+							if err := c.discord.SendError(err); err != nil {
+								log.Printf("에러 알림 전송 실패: %v", err)
+							}
+						}
+
+					} else {
+						log.Printf("진입 불가: %s", result.Reason)
 					}
 				}
 			}
@@ -208,23 +208,6 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 	return nil
 }
-
-// // calculatePositionValue는 수수료와 유지증거금을 고려하여 최대 포지션 크기를 계산합니다
-// // 최대 포지션 크기 계산식
-// // 최대 포지션 = 가용잔고 × 레버리지 / (1 + 유지증거금률 + 총수수료율)
-// func (c *Collector) calculatePositionValue(
-// 	balance float64,
-// 	leverage int,
-// 	maintMargin float64,
-// ) float64 {
-// 	// 수수료율 (진입 + 청산)
-// 	totalFeeRate := 0.001 // 0.1%
-
-// 	// 포지션 크기 계산
-// 	positionSize := (balance * float64(leverage)) / (1 + maintMargin + totalFeeRate)
-
-// 	return math.Floor(positionSize*100) / 100 // 소수점 2자리까지 내림
-// }
 
 // calculatePosition은 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기와 수량을 계산합니다
 // 단계별 계산:
