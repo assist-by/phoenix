@@ -230,8 +230,21 @@ func (c *Collector) calculatePosition(
 	theoreticalMaxQuantity := theoreticalMaxPosition / coinPrice
 
 	// 3. 최소 주문 단위로 수량 조정
+	// stepSize가 0.001이면 소수점 3자리
+	precision := 0
+	temp := stepSize
+	for temp < 1.0 {
+		temp *= 10
+		precision++
+	}
+
+	// 소수점 자릿수에 맞춰 내림 계산
+	scale := math.Pow(10, float64(precision))
 	steps := math.Floor(theoreticalMaxQuantity / stepSize)
 	adjustedQuantity := steps * stepSize
+
+	// 소수점 자릿수 정밀도 보장
+	adjustedQuantity = math.Floor(adjustedQuantity*scale) / scale
 
 	// 4. 조정된 수량으로 실제 포지션 가치 계산
 	actualPositionValue := adjustedQuantity * coinPrice
@@ -407,10 +420,22 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		return fmt.Errorf("레버리지 설정 실패: %w", err)
 	}
 
-	// 5. 주문 수량 계산 (필요시)
-	quantity := result.PositionValue / s.Price
-	// 수량 반올림 (거래소별 최소 단위에 맞게 조정 필요)
-	quantity = math.Floor(quantity*1000) / 1000
+	// // 5. 주문 수량 계산 (필요시)
+	// quantity := result.PositionValue / s.Price
+	// // 수량 반올림 (거래소별 최소 단위에 맞게 조정 필요)
+	// quantity = math.Floor(quantity*1000) / 1000
+
+	quantity := result.Quantity
+	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
+	if err != nil {
+		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
+	}
+	precision := symbolInfo.QuantityPrecision
+	scale := math.Pow(10, float64(precision))
+	quantity = math.Floor(quantity*scale) / scale
+
+	c.discord.SendInfo(fmt.Sprintf("in [excuteSignalTrade] 주문 수량 계산: %s, 원래 수량=%.8f, 조정된 수량=%.8f, 소수점 자릿수=%d",
+		s.Symbol, result.Quantity, quantity, precision))
 
 	// 6. 진입 주문 생성
 	orderSide := Buy
@@ -480,6 +505,21 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 
 // placeTPSLOrders는 TP(Take Profit)와 SL(Stop Loss) 주문을 설정합니다
 func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quantity float64) error {
+
+	// 심볼 정보 조회하여 정밀도 가져오기
+	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
+	if err != nil {
+		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
+	}
+
+	// 정밀도에 맞게 수량 조정
+	precision := symbolInfo.QuantityPrecision
+	scale := math.Pow(10, float64(precision))
+	adjustedQuantity := math.Floor(quantity*scale) / scale
+
+	c.discord.SendInfo(fmt.Sprintf("in [excuteSignalTrade] TP/SL 주문 수량 계산: %s, 원래 수량=%.8f, 조정된 수량=%.8f, 소수점 자릿수=%d",
+		s.Symbol, quantity, adjustedQuantity, precision))
+
 	// 주문의 반대 사이드 계산
 	oppositeSide := Sell
 	if s.Type == signal.Short {
@@ -497,13 +537,13 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quant
 		Symbol:       s.Symbol,
 		Side:         oppositeSide,
 		PositionSide: positionSide,
-		Type:         StopMarket, // 스탑 마켓 주문
-		Quantity:     quantity,
-		StopPrice:    s.StopLoss, // 손절가
+		Type:         StopMarket,       // 스탑 마켓 주문
+		Quantity:     adjustedQuantity, // 정밀도 조정된 수량
+		StopPrice:    s.StopLoss,       // 손절가
 	}
 
 	// 손절 주문 실행
-	_, err := c.client.PlaceOrder(ctx, slOrder)
+	_, err = c.client.PlaceOrder(ctx, slOrder)
 	if err != nil {
 		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
 	}
@@ -514,8 +554,8 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quant
 		Side:         oppositeSide,
 		PositionSide: positionSide,
 		Type:         TakeProfitMarket, // 익절 마켓 주문
-		Quantity:     quantity,
-		StopPrice:    s.TakeProfit, // 익절가
+		Quantity:     adjustedQuantity, // 정밀도 조정된 수량
+		StopPrice:    s.TakeProfit,     // 익절가
 	}
 
 	// 익절 주문 실행
