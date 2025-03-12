@@ -32,6 +32,17 @@ type Client struct {
 // ClientOption은 클라이언트 생성 옵션을 정의합니다
 type ClientOption func(*Client)
 
+// WithTestnet은 테스트넷 사용 여부를 설정합니다
+func WithTestnet(useTestnet bool) ClientOption {
+	return func(c *Client) {
+		if useTestnet {
+			c.baseURL = "https://testnet.binancefuture.com"
+		} else {
+			c.baseURL = "https://fapi.binance.com"
+		}
+	}
+}
+
 // WithTimeout은 HTTP 클라이언트의 타임아웃을 설정합니다
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {

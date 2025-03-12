@@ -41,6 +41,10 @@ func (t *CollectorTask) Execute(ctx context.Context) error {
 }
 
 func main() {
+	// 컨텍스트 생성
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	// 로그 설정
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	log.Println("트레이딩 봇 시작...")
@@ -50,6 +54,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("설정 로드 실패: %v", err)
 	}
+
+	// API 키 선택
+	apiKey := cfg.Binance.APIKey
+	secretKey := cfg.Binance.SecretKey
 
 	// Discord 클라이언트 생성
 	discordClient := discord.NewClient(
@@ -65,15 +73,22 @@ func main() {
 		log.Printf("시작 알림 전송 실패: %v", err)
 	}
 
-	// 컨텍스트 생성
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// 테스트넷 사용 시 테스트넷 API 키로 변경
+	if cfg.Binance.UseTestnet {
+		apiKey = cfg.Binance.TestAPIKey
+		secretKey = cfg.Binance.TestSecretKey
+
+		discordClient.SendInfo("⚠️ 테스트넷 모드로 실행 중입니다. 실제 자산은 사용되지 않습니다.")
+	} else {
+		discordClient.SendInfo("⚠️ 메인넷 모드로 실행 중입니다. 실제 자산이 사용됩니다!")
+	}
 
 	// 바이낸스 클라이언트 생성
 	binanceClient := market.NewClient(
-		cfg.Binance.APIKey,
-		cfg.Binance.SecretKey,
+		apiKey,
+		secretKey,
 		market.WithTimeout(10*time.Second),
+		market.WithTestnet(cfg.Binance.UseTestnet),
 	)
 	// 바이낸스 서버와 시간 동기화
 	if err := binanceClient.SyncTime(ctx); err != nil {

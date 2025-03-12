@@ -11,8 +11,16 @@ import (
 type Config struct {
 	// 바이낸스 API 설정
 	Binance struct {
+		// 메인넷 API 키
 		APIKey    string `envconfig:"BINANCE_API_KEY" required:"true"`
 		SecretKey string `envconfig:"BINANCE_SECRET_KEY" required:"true"`
+
+		// 테스트넷 API 키
+		TestAPIKey    string `envconfig:"BINANCE_TEST_API_KEY" required:"false"`
+		TestSecretKey string `envconfig:"BINANCE_TEST_SECRET_KEY" required:"false"`
+
+		// 테스트넷 사용 여부
+		UseTestnet bool `envconfig:"USE_TESTNET" default:"false"`
 	}
 
 	// 디스코드 웹훅 설정
@@ -37,6 +45,18 @@ type Config struct {
 
 // ValidateConfig는 설정이 유효한지 확인합니다.
 func ValidateConfig(cfg *Config) error {
+	if cfg.Binance.UseTestnet {
+		// 테스트넷 모드일 때 테스트넷 API 키 검증
+		if cfg.Binance.TestAPIKey == "" || cfg.Binance.TestSecretKey == "" {
+			return fmt.Errorf("테스트넷 모드에서는 BINANCE_TEST_API_KEY와 BINANCE_TEST_SECRET_KEY가 필요합니다")
+		}
+	} else {
+		// 메인넷 모드일 때 메인넷 API 키 검증
+		if cfg.Binance.APIKey == "" || cfg.Binance.SecretKey == "" {
+			return fmt.Errorf("메인넷 모드에서는 BINANCE_API_KEY와 BINANCE_SECRET_KEY가 필요합니다")
+		}
+	}
+
 	if cfg.Trading.Leverage < 1 || cfg.Trading.Leverage > 100 {
 		return fmt.Errorf("레버리지는 1 이상 100 이하이어야 합니다")
 	}
