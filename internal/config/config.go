@@ -2,6 +2,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -33,8 +35,11 @@ type Config struct {
 
 	// 애플리케이션 설정
 	App struct {
-		FetchInterval time.Duration `envconfig:"FETCH_INTERVAL" default:"15m"`
-		CandleLimit   int           `envconfig:"CANDLE_LIMIT" default:"100"`
+		FetchInterval   time.Duration `envconfig:"FETCH_INTERVAL" default:"15m"`
+		CandleLimit     int           `envconfig:"CANDLE_LIMIT" default:"100"`
+		Symbols         []string      `envconfig:"SYMBOLS" default:""`              // 커스텀 심볼 목록
+		UseTopSymbols   bool          `envconfig:"USE_TOP_SYMBOLS" default:"false"` // 거래량 상위 심볼 사용 여부
+		TopSymbolsCount int           `envconfig:"TOP_SYMBOLS_COUNT" default:"3"`   // 거래량 상위 심볼 개수
 	}
 
 	// 거래 설정
@@ -83,6 +88,14 @@ func LoadConfig() (*Config, error) {
 	// 환경변수를 구조체로 파싱
 	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, fmt.Errorf("환경변수 처리 실패: %w", err)
+	}
+
+	// 심볼 문자열 파싱
+	if symbolsStr := os.Getenv("SYMBOLS"); symbolsStr != "" {
+		cfg.App.Symbols = strings.Split(symbolsStr, ",")
+		for i, s := range cfg.App.Symbols {
+			cfg.App.Symbols[i] = strings.TrimSpace(s)
+		}
 	}
 
 	// 설정값 검증

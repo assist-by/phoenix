@@ -113,8 +113,7 @@ func main() {
 		binanceClient,
 		discordClient,
 		detector,
-		cfg.App.FetchInterval,
-		cfg.App.CandleLimit,
+		cfg,
 		market.WithRetryConfig(market.RetryConfig{
 			MaxRetries: 3,
 			BaseDelay:  1 * time.Second,

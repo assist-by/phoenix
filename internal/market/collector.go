@@ -10,6 +10,7 @@ import (
 
 	"github.com/assist-by/phoenix/internal/analysis/indicator"
 	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 )
@@ -24,23 +25,22 @@ type RetryConfig struct {
 
 // Collector는 시장 데이터 수집기를 구현합니다
 type Collector struct {
-	client        *Client
-	discord       *discord.Client
-	detector      *signal.Detector
-	fetchInterval time.Duration
-	candleLimit   int
-	retry         RetryConfig
-	mu            sync.Mutex // RWMutex에서 일반 Mutex로 변경
+	client   *Client
+	discord  *discord.Client
+	detector *signal.Detector
+	config   *config.Config
+
+	retry RetryConfig
+	mu    sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
+func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, config *config.Config, opts ...CollectorOption) *Collector {
 	c := &Collector{
-		client:        client,
-		discord:       discord,
-		detector:      detector,
-		fetchInterval: fetchInterval,
-		candleLimit:   candleLimit,
+		client:   client,
+		discord:  discord,
+		detector: detector,
+		config:   config,
 	}
 
 	for _, opt := range opts {
@@ -56,7 +56,7 @@ type CollectorOption func(*Collector)
 // WithCandleLimit은 캔들 데이터 조회 개수를 설정합니다
 func WithCandleLimit(limit int) CollectorOption {
 	return func(c *Collector) {
-		c.candleLimit = limit
+		c.config.App.CandleLimit = limit
 	}
 }
 
@@ -72,15 +72,28 @@ func (c *Collector) Collect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 이하 collect() 함수의 내용을 그대로 사용
+	// 심볼 목록 결정
 	var symbols []string
-	err := c.withRetry(ctx, "상위 거래량 심볼 조회", func() error {
-		var err error
-		symbols, err = c.client.GetTopVolumeSymbols(ctx, 3)
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+	var err error
+
+	if c.config.App.UseTopSymbols {
+		// 거래량 상위 심볼 조회
+		err = c.withRetry(ctx, "상위 거래량 심볼 조회", func() error {
+			var err error
+			symbols, err = c.client.GetTopVolumeSymbols(ctx, c.config.App.TopSymbolsCount)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+		}
+	} else {
+		// 설정된 심볼 사용
+		if len(c.config.App.Symbols) > 0 {
+			symbols = c.config.App.Symbols
+		} else {
+			// 기본값으로 BTCUSDT 사용
+			symbols = []string{"BTCUSDT"}
+		}
 	}
 
 	// 각 심볼의 잔고 조회
@@ -111,7 +124,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
-			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
+			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.config.App.CandleLimit)
 			if err != nil {
 				return err
 			}
@@ -594,7 +607,7 @@ func calculatePctDiff(base, target float64, isGain bool) float64 {
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다
 func (c *Collector) getIntervalString() string {
-	switch c.fetchInterval {
+	switch c.config.App.FetchInterval {
 	case 1 * time.Minute:
 		return "1m"
 	case 3 * time.Minute:
