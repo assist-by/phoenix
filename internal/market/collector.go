@@ -223,13 +223,20 @@ func (c *Collector) calculatePosition(
 	stepSize float64, // 코인 최소 주문 단위
 	maintMargin float64, // 유지증거금률
 ) PositionSizeResult {
-	// 1. 이론적 최대 포지션 계산
-	theoreticalMaxPosition := balance * float64(leverage)
+	// 1. 사용 가능한 잔고에서 안전 비율만 사용 (90%)
+	safeBalance := balance * 0.9
 
-	// 2. 이론적 최대 코인 수량 계산
-	theoreticalMaxQuantity := theoreticalMaxPosition / coinPrice
+	// 2. 레버리지 적용 및 수수료 고려
+	totalFeeRate := 0.002 // 0.2% (진입 + 청산 수수료 + 여유분)
+	effectiveMargin := maintMargin + totalFeeRate
 
-	// 3. 최소 주문 단위로 수량 조정
+	// 안전하게 사용 가능한 최대 포지션 가치 계산
+	maxSafePositionValue := (safeBalance * float64(leverage)) / (1 + effectiveMargin)
+
+	// 3. 최대 안전 수량 계산
+	maxSafeQuantity := maxSafePositionValue / coinPrice
+
+	// 4. 최소 주문 단위로 수량 조정
 	// stepSize가 0.001이면 소수점 3자리
 	precision := 0
 	temp := stepSize
@@ -240,20 +247,19 @@ func (c *Collector) calculatePosition(
 
 	// 소수점 자릿수에 맞춰 내림 계산
 	scale := math.Pow(10, float64(precision))
-	steps := math.Floor(theoreticalMaxQuantity / stepSize)
+	steps := math.Floor(maxSafeQuantity / stepSize)
 	adjustedQuantity := steps * stepSize
 
 	// 소수점 자릿수 정밀도 보장
 	adjustedQuantity = math.Floor(adjustedQuantity*scale) / scale
 
-	// 4. 조정된 수량으로 실제 포지션 가치 계산
-	actualPositionValue := adjustedQuantity * coinPrice
+	// 5. 최종 포지션 가치 계산
+	finalPositionValue := adjustedQuantity * coinPrice
 
-	// 5. 수수료와 유지증거금을 고려한 최종 조정
-	totalFeeRate := 0.001 // 0.1% (진입 + 청산 수수료)
-	finalPositionValue := actualPositionValue / (1 + maintMargin + totalFeeRate)
+	// 포지션 크기에 대한 추가 안전장치 (최소값과 최대값 제한)
+	finalPositionValue = math.Min(finalPositionValue, maxSafePositionValue)
 
-	// 소수점 2자리까지 내림
+	// 소수점 2자리까지 내림 (USDT 기준)
 	return PositionSizeResult{
 		PositionValue: math.Floor(finalPositionValue*100) / 100,
 		Quantity:      adjustedQuantity,
