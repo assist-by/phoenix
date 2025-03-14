@@ -721,8 +721,7 @@ func main() {
 		binanceClient,
 		discordClient,
 		detector,
-		cfg.App.FetchInterval,
-		cfg.App.CandleLimit,
+		cfg,
 		market.WithRetryConfig(market.RetryConfig{
 			MaxRetries: 3,
 			BaseDelay:  1 * time.Second,
@@ -2214,6 +2213,8 @@ package config
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -2245,8 +2246,11 @@ type Config struct {
 
 	// 애플리케이션 설정
 	App struct {
-		FetchInterval time.Duration `envconfig:"FETCH_INTERVAL" default:"15m"`
-		CandleLimit   int           `envconfig:"CANDLE_LIMIT" default:"100"`
+		FetchInterval   time.Duration `envconfig:"FETCH_INTERVAL" default:"15m"`
+		CandleLimit     int           `envconfig:"CANDLE_LIMIT" default:"100"`
+		Symbols         []string      `envconfig:"SYMBOLS" default:""`              // 커스텀 심볼 목록
+		UseTopSymbols   bool          `envconfig:"USE_TOP_SYMBOLS" default:"false"` // 거래량 상위 심볼 사용 여부
+		TopSymbolsCount int           `envconfig:"TOP_SYMBOLS_COUNT" default:"3"`   // 거래량 상위 심볼 개수
 	}
 
 	// 거래 설정
@@ -2295,6 +2299,14 @@ func LoadConfig() (*Config, error) {
 	// 환경변수를 구조체로 파싱
 	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, fmt.Errorf("환경변수 처리 실패: %w", err)
+	}
+
+	// 심볼 문자열 파싱
+	if symbolsStr := os.Getenv("SYMBOLS"); symbolsStr != "" {
+		cfg.App.Symbols = strings.Split(symbolsStr, ",")
+		for i, s := range cfg.App.Symbols {
+			cfg.App.Symbols[i] = strings.TrimSpace(s)
+		}
 	}
 
 	// 설정값 검증
@@ -2941,6 +2953,7 @@ import (
 
 	"github.com/assist-by/phoenix/internal/analysis/indicator"
 	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 )
@@ -2955,23 +2968,22 @@ type RetryConfig struct {
 
 // Collector는 시장 데이터 수집기를 구현합니다
 type Collector struct {
-	client        *Client
-	discord       *discord.Client
-	detector      *signal.Detector
-	fetchInterval time.Duration
-	candleLimit   int
-	retry         RetryConfig
-	mu            sync.Mutex // RWMutex에서 일반 Mutex로 변경
+	client   *Client
+	discord  *discord.Client
+	detector *signal.Detector
+	config   *config.Config
+
+	retry RetryConfig
+	mu    sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, fetchInterval time.Duration, candleLimit int, opts ...CollectorOption) *Collector {
+func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, config *config.Config, opts ...CollectorOption) *Collector {
 	c := &Collector{
-		client:        client,
-		discord:       discord,
-		detector:      detector,
-		fetchInterval: fetchInterval,
-		candleLimit:   candleLimit,
+		client:   client,
+		discord:  discord,
+		detector: detector,
+		config:   config,
 	}
 
 	for _, opt := range opts {
@@ -2987,7 +2999,7 @@ type CollectorOption func(*Collector)
 // WithCandleLimit은 캔들 데이터 조회 개수를 설정합니다
 func WithCandleLimit(limit int) CollectorOption {
 	return func(c *Collector) {
-		c.candleLimit = limit
+		c.config.App.CandleLimit = limit
 	}
 }
 
@@ -3003,15 +3015,28 @@ func (c *Collector) Collect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 이하 collect() 함수의 내용을 그대로 사용
+	// 심볼 목록 결정
 	var symbols []string
-	err := c.withRetry(ctx, "상위 거래량 심볼 조회", func() error {
-		var err error
-		symbols, err = c.client.GetTopVolumeSymbols(ctx, 3)
-		return err
-	})
-	if err != nil {
-		return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+	var err error
+
+	if c.config.App.UseTopSymbols {
+		// 거래량 상위 심볼 조회
+		err = c.withRetry(ctx, "상위 거래량 심볼 조회", func() error {
+			var err error
+			symbols, err = c.client.GetTopVolumeSymbols(ctx, c.config.App.TopSymbolsCount)
+			return err
+		})
+		if err != nil {
+			return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+		}
+	} else {
+		// 설정된 심볼 사용
+		if len(c.config.App.Symbols) > 0 {
+			symbols = c.config.App.Symbols
+		} else {
+			// 기본값으로 BTCUSDT 사용
+			symbols = []string{"BTCUSDT"}
+		}
 	}
 
 	// 각 심볼의 잔고 조회
@@ -3042,7 +3067,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
-			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.candleLimit)
+			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.config.App.CandleLimit)
 			if err != nil {
 				return err
 			}
@@ -3154,13 +3179,20 @@ func (c *Collector) calculatePosition(
 	stepSize float64, // 코인 최소 주문 단위
 	maintMargin float64, // 유지증거금률
 ) PositionSizeResult {
-	// 1. 이론적 최대 포지션 계산
-	theoreticalMaxPosition := balance * float64(leverage)
+	// 1. 사용 가능한 잔고에서 안전 비율만 사용 (90%)
+	safeBalance := balance * 0.9
 
-	// 2. 이론적 최대 코인 수량 계산
-	theoreticalMaxQuantity := theoreticalMaxPosition / coinPrice
+	// 2. 레버리지 적용 및 수수료 고려
+	totalFeeRate := 0.002 // 0.2% (진입 + 청산 수수료 + 여유분)
+	effectiveMargin := maintMargin + totalFeeRate
 
-	// 3. 최소 주문 단위로 수량 조정
+	// 안전하게 사용 가능한 최대 포지션 가치 계산
+	maxSafePositionValue := (safeBalance * float64(leverage)) / (1 + effectiveMargin)
+
+	// 3. 최대 안전 수량 계산
+	maxSafeQuantity := maxSafePositionValue / coinPrice
+
+	// 4. 최소 주문 단위로 수량 조정
 	// stepSize가 0.001이면 소수점 3자리
 	precision := 0
 	temp := stepSize
@@ -3171,20 +3203,19 @@ func (c *Collector) calculatePosition(
 
 	// 소수점 자릿수에 맞춰 내림 계산
 	scale := math.Pow(10, float64(precision))
-	steps := math.Floor(theoreticalMaxQuantity / stepSize)
+	steps := math.Floor(maxSafeQuantity / stepSize)
 	adjustedQuantity := steps * stepSize
 
 	// 소수점 자릿수 정밀도 보장
 	adjustedQuantity = math.Floor(adjustedQuantity*scale) / scale
 
-	// 4. 조정된 수량으로 실제 포지션 가치 계산
-	actualPositionValue := adjustedQuantity * coinPrice
+	// 5. 최종 포지션 가치 계산
+	finalPositionValue := adjustedQuantity * coinPrice
 
-	// 5. 수수료와 유지증거금을 고려한 최종 조정
-	totalFeeRate := 0.001 // 0.1% (진입 + 청산 수수료)
-	finalPositionValue := actualPositionValue / (1 + maintMargin + totalFeeRate)
+	// 포지션 크기에 대한 추가 안전장치 (최소값과 최대값 제한)
+	finalPositionValue = math.Min(finalPositionValue, maxSafePositionValue)
 
-	// 소수점 2자리까지 내림
+	// 소수점 2자리까지 내림 (USDT 기준)
 	return PositionSizeResult{
 		PositionValue: math.Floor(finalPositionValue*100) / 100,
 		Quantity:      adjustedQuantity,
@@ -3351,24 +3382,20 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		return fmt.Errorf("레버리지 설정 실패: %w", err)
 	}
 
-	// // 5. 주문 수량 계산 (필요시)
-	// quantity := result.PositionValue / s.Price
-	// // 수량 반올림 (거래소별 최소 단위에 맞게 조정 필요)
-	// quantity = math.Floor(quantity*1000) / 1000
-
-	quantity := result.Quantity
+	// 5. 심볼 정보 조회
 	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
 	if err != nil {
 		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
 	}
-	precision := symbolInfo.QuantityPrecision
-	scale := math.Pow(10, float64(precision))
-	quantity = math.Floor(quantity*scale) / scale
 
-	c.discord.SendInfo(fmt.Sprintf("in [excuteSignalTrade] 주문 수량 계산: %s, 원래 수량=%.8f, 조정된 수량=%.8f, 소수점 자릿수=%d",
-		s.Symbol, result.Quantity, quantity, precision))
+	// 6. 주문 수량 정밀도 조정 (StepSize 기준)
+	originalQuantity := result.Quantity
+	adjustedQuantity := adjustQuantity(originalQuantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision)
 
-	// 6. 진입 주문 생성
+	c.discord.SendInfo(fmt.Sprintf("주문 수량 계산: %s, 원래 수량=%f, 조정된 수량=%f, stepSize=%.8f, 정밀도=%d",
+		s.Symbol, originalQuantity, adjustedQuantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision))
+
+	// 7. 진입 주문 생성
 	orderSide := Buy
 	positionSide := Long
 	if s.Type == signal.Short {
@@ -3376,16 +3403,16 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		positionSide = Short
 	}
 
-	// 7. 진입 주문 실행
+	// 8. 진입 주문 실행
 	entryOrder := OrderRequest{
 		Symbol:       s.Symbol,
 		Side:         orderSide,
 		PositionSide: positionSide,
 		Type:         Market,
-		Quantity:     quantity,
+		Quantity:     adjustedQuantity,
 	}
 
-	mainOrder, err := c.client.PlaceOrder(ctx, entryOrder)
+	_, err = c.client.PlaceOrder(ctx, entryOrder)
 	if err != nil {
 		return fmt.Errorf("주문 실행 실패: %w", err)
 	}
@@ -3408,7 +3435,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		Symbol:        s.Symbol,
 		PositionType:  s.Type.String(),
 		PositionValue: result.PositionValue,
-		Quantity:      result.Quantity,
+		Quantity:      adjustedQuantity, // 조정된 수량 사용
 		EntryPrice:    s.Price,
 		StopLoss:      s.StopLoss,
 		TakeProfit:    s.TakeProfit,
@@ -3420,8 +3447,8 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		log.Printf("거래 정보 알림 전송 실패: %v", err)
 	}
 
-	// 8. TP/SL 주문 실행
-	if err := c.placeTPSLOrders(ctx, s, mainOrder.ExecutedQuantity); err != nil {
+	// 9. TP/SL 주문 실행 - 여기서는 동일한 조정된 수량 사용
+	if err := c.placeTPSLOrders(ctx, s, adjustedQuantity); err != nil {
 		// TP/SL 설정 실패 알림
 		errMsg := fmt.Errorf("⚠️ TP/SL 주문 설정 실패: %w", err)
 		log.Printf("%v", errMsg)
@@ -3435,21 +3462,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 }
 
 // placeTPSLOrders는 TP(Take Profit)와 SL(Stop Loss) 주문을 설정합니다
-func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quantity float64) error {
-
-	// 심볼 정보 조회하여 정밀도 가져오기
-	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
-	if err != nil {
-		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
-	}
-
-	// 정밀도에 맞게 수량 조정
-	precision := symbolInfo.QuantityPrecision
-	scale := math.Pow(10, float64(precision))
-	adjustedQuantity := math.Floor(quantity*scale) / scale
-
-	c.discord.SendInfo(fmt.Sprintf("in [excuteSignalTrade] TP/SL 주문 수량 계산: %s, 원래 수량=%.8f, 조정된 수량=%.8f, 소수점 자릿수=%d",
-		s.Symbol, quantity, adjustedQuantity, precision))
+func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, adjustedQuantity float64) error {
 
 	// 주문의 반대 사이드 계산
 	oppositeSide := Sell
@@ -3469,12 +3482,12 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quant
 		Side:         oppositeSide,
 		PositionSide: positionSide,
 		Type:         StopMarket,       // 스탑 마켓 주문
-		Quantity:     adjustedQuantity, // 정밀도 조정된 수량
+		Quantity:     adjustedQuantity, // 이미 조정된 수량
 		StopPrice:    s.StopLoss,       // 손절가
 	}
 
 	// 손절 주문 실행
-	_, err = c.client.PlaceOrder(ctx, slOrder)
+	_, err := c.client.PlaceOrder(ctx, slOrder)
 	if err != nil {
 		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
 	}
@@ -3485,7 +3498,7 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quant
 		Side:         oppositeSide,
 		PositionSide: positionSide,
 		Type:         TakeProfitMarket, // 익절 마켓 주문
-		Quantity:     adjustedQuantity, // 정밀도 조정된 수량
+		Quantity:     adjustedQuantity, // 이미 조정된 수량
 		StopPrice:    s.TakeProfit,     // 익절가
 	}
 
@@ -3511,6 +3524,21 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quant
 	return nil
 }
 
+// adjustQuantity는 바이낸스 최소 단위(stepSize)에 맞게 수량을 조정합니다
+func adjustQuantity(quantity float64, stepSize float64, precision int) float64 {
+	if stepSize == 0 {
+		return quantity // stepSize가 0이면 조정 불필요
+	}
+
+	// stepSize로 나누어 떨어지도록 조정
+	steps := math.Floor(quantity / stepSize)
+	adjustedQuantity := steps * stepSize
+
+	// 정밀도에 맞게 반올림
+	scale := math.Pow(10, float64(precision))
+	return math.Floor(adjustedQuantity*scale) / scale
+}
+
 // calculatePctDiff는 두 가격 간의 백분율 차이를 계산합니다
 func calculatePctDiff(base, target float64, isGain bool) float64 {
 	diff := (target - base) / base * 100
@@ -3522,7 +3550,7 @@ func calculatePctDiff(base, target float64, isGain bool) float64 {
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다
 func (c *Collector) getIntervalString() string {
-	switch c.fetchInterval {
+	switch c.config.App.FetchInterval {
 	case 1 * time.Minute:
 		return "1m"
 	case 3 * time.Minute:
