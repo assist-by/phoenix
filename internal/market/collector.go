@@ -474,6 +474,17 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		return fmt.Errorf("주문 실행 실패: %w", err)
 	}
 
+	// 9. 포지션이 실제로 생성되었는지 확인 후 TP/SL 주문 설정
+	if err := c.waitForPositionAndSetTPSL(ctx, s); err != nil {
+		// TP/SL 설정 실패 알림
+		errMsg := fmt.Errorf("⚠️ TP/SL 주문 설정 실패: %w", err)
+		log.Printf("%v", errMsg)
+		if err := c.discord.SendError(errMsg); err != nil {
+			log.Printf("에러 알림 전송 실패: %v", err)
+		}
+		// TP/SL 실패해도 메인 주문은 이미 실행되었으므로 계속 진행
+	}
+
 	// 잔고 조회하여 TradeInfo에 추가
 	balances, err := c.client.GetBalance(ctx)
 	if err != nil {
@@ -492,7 +503,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		Symbol:        s.Symbol,
 		PositionType:  s.Type.String(),
 		PositionValue: result.PositionValue,
-		Quantity:      adjustedQuantity, // 조정된 수량 사용
+		Quantity:      adjustedQuantity,
 		EntryPrice:    s.Price,
 		StopLoss:      s.StopLoss,
 		TakeProfit:    s.TakeProfit,
@@ -504,22 +515,96 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		log.Printf("거래 정보 알림 전송 실패: %v", err)
 	}
 
-	// 9. TP/SL 주문 실행 - 여기서는 동일한 조정된 수량 사용
-	if err := c.placeTPSLOrders(ctx, s, adjustedQuantity); err != nil {
-		// TP/SL 설정 실패 알림
-		errMsg := fmt.Errorf("⚠️ TP/SL 주문 설정 실패: %w", err)
-		log.Printf("%v", errMsg)
-		if err := c.discord.SendError(errMsg); err != nil {
-			log.Printf("에러 알림 전송 실패: %v", err)
-		}
-		// TP/SL 실패해도 메인 주문은 이미 실행되었으므로 계속 진행
-	}
-
 	return nil
 }
 
+// waitForPositionAndSetTPSL은 포지션이 생성되었는지 확인한 후 TP/SL을 설정합니다
+func (c *Collector) waitForPositionAndSetTPSL(ctx context.Context, s *signal.Signal) error {
+	const (
+		maxRetries   = 5           // 최대 재시도 횟수
+		initialDelay = time.Second // 초기 대기 시간
+		maxDelay     = 5 * time.Second
+	)
+
+	var positionFound bool
+	var delay = initialDelay
+
+	// 포지션 확인 및 대기
+	for i := 0; i < maxRetries; i++ {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+			// 다음 재시도 전 대기 시간 지수적 증가 (지수 백오프)
+			delay = min(delay*2, maxDelay)
+		}
+		// 포지션 조회
+		positions, err := c.client.GetPositions(ctx)
+		if err != nil {
+			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
+			continue
+		}
+
+		// 해당 심볼의 원하는 포지션 타입 찾기
+		targetPositionSide := "LONG"
+		if s.Type == signal.Short {
+			targetPositionSide = "SHORT"
+		}
+
+		// 포지션 검증
+		for _, pos := range positions {
+			if pos.Symbol == s.Symbol && pos.PositionSide == targetPositionSide && pos.Quantity != 0 {
+				positionFound = true
+				log.Printf("포지션 확인됨: %s %s, 수량: %.8f, 진입가: %.2f",
+					pos.Symbol, pos.PositionSide, pos.Quantity, pos.EntryPrice)
+
+				// 실제 진입가로 TP/SL 재계산
+				actualEntryPrice := pos.EntryPrice
+				actualQuantity := math.Abs(pos.Quantity)
+
+				// 조정된 TP/SL 설정
+				var stopLoss, takeProfit float64
+				if s.Type == signal.Long {
+					// 롱 포지션: TP와 SL은 비율을 유지
+					slDistance := s.Price - s.StopLoss
+					tpDistance := s.TakeProfit - s.Price
+					stopLoss = actualEntryPrice - slDistance
+					takeProfit = actualEntryPrice + tpDistance
+				} else {
+					// 숏 포지션: TP와 SL은 비율을 유지
+					slDistance := s.StopLoss - s.Price
+					tpDistance := s.Price - s.TakeProfit
+					stopLoss = actualEntryPrice + slDistance
+					takeProfit = actualEntryPrice - tpDistance
+				}
+
+				log.Printf("실제 진입가 기준 TP/SL 계산: 진입가=%.2f, 손절=%.2f, 익절=%.2f",
+					actualEntryPrice, stopLoss, takeProfit)
+
+				// TP/SL 주문 실행
+				if err := c.placeTPSLOrders(ctx, s, actualQuantity, stopLoss, takeProfit); err != nil {
+					return fmt.Errorf("TP/SL 주문 실패: %w", err)
+				}
+
+				return nil // 성공적으로 TP/SL 설정 완료
+
+			}
+		}
+
+		log.Printf("아직 포지션이 생성되지 않음 (시도 %d/%d), 재시도 중...", i+1, maxRetries)
+
+	}
+
+	if !positionFound {
+		return fmt.Errorf("최대 재시도 횟수(%d) 도달: 포지션을 찾을 수 없음", maxRetries)
+	}
+
+	return nil
+
+}
+
 // placeTPSLOrders는 TP(Take Profit)와 SL(Stop Loss) 주문을 설정합니다
-func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, adjustedQuantity float64) error {
+func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quantity float64, stopLoss, takeProfit float64) error {
 
 	// 주문의 반대 사이드 계산
 	oppositeSide := Sell
@@ -538,9 +623,9 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, adjus
 		Symbol:       s.Symbol,
 		Side:         oppositeSide,
 		PositionSide: positionSide,
-		Type:         StopMarket,       // 스탑 마켓 주문
-		Quantity:     adjustedQuantity, // 이미 조정된 수량
-		StopPrice:    s.StopLoss,       // 손절가
+		Type:         StopMarket,
+		Quantity:     quantity,
+		StopPrice:    stopLoss,
 	}
 
 	// 손절 주문 실행
@@ -554,9 +639,9 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, adjus
 		Symbol:       s.Symbol,
 		Side:         oppositeSide,
 		PositionSide: positionSide,
-		Type:         TakeProfitMarket, // 익절 마켓 주문
-		Quantity:     adjustedQuantity, // 이미 조정된 수량
-		StopPrice:    s.TakeProfit,     // 익절가
+		Type:         TakeProfitMarket,
+		Quantity:     quantity,
+		StopPrice:    takeProfit,
 	}
 
 	// 익절 주문 실행
