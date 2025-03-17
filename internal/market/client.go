@@ -390,66 +390,6 @@ func (c *Client) GetSymbolInfo(ctx context.Context, symbol string) (*SymbolInfo,
 	return info, nil
 }
 
-// func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
-// 	params := url.Values{}
-// 	params.Add("symbol", order.Symbol)
-// 	params.Add("side", string(order.Side))
-// 	params.Add("type", string(order.Type))
-// 	params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
-// 	params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-// 	params.Add("stopLimitPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
-// 	params.Add("price", strconv.FormatFloat(order.TakeProfit, 'f', -1, 64))
-
-// 	if order.PositionSide != "" {
-// 		params.Add("positionSide", string(order.PositionSide))
-// 	}
-
-// 	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order/oco", params, true)
-// 	if err != nil {
-// 		return nil, fmt.Errorf("OCO 주문 실행 실패: %w", err)
-// 	}
-
-// 	var result OrderResponse
-// 	if err := json.Unmarshal(resp, &result); err != nil {
-// 		return nil, fmt.Errorf("주문 응답 파싱 실패: %w", err)
-// 	}
-
-// 	return &result, nil
-// }
-
-// // PlaceTPSLOrder는 손절/익절 주문을 생성합니다
-// func (c *Client) PlaceTPSLOrder(ctx context.Context, mainOrder *OrderResponse, stopLoss, takeProfit float64) error {
-// 	if stopLoss > 0 {
-// 		slOrder := OrderRequest{
-// 			Symbol:       mainOrder.Symbol,
-// 			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
-// 			Type:         StopMarket,
-// 			Quantity:     mainOrder.ExecutedQuantity,
-// 			StopPrice:    stopLoss,
-// 			PositionSide: mainOrder.PositionSide,
-// 		}
-// 		if _, err := c.PlaceOrder(ctx, slOrder); err != nil {
-// 			return fmt.Errorf("손절 주문 실패: %w", err)
-// 		}
-// 	}
-
-// 	if takeProfit > 0 {
-// 		tpOrder := OrderRequest{
-// 			Symbol:       mainOrder.Symbol,
-// 			Side:         getOppositeOrderSide(OrderSide(mainOrder.Side)),
-// 			Type:         TakeProfitMarket,
-// 			Quantity:     mainOrder.ExecutedQuantity,
-// 			StopPrice:    takeProfit,
-// 			PositionSide: mainOrder.PositionSide,
-// 		}
-// 		if _, err := c.PlaceOrder(ctx, tpOrder); err != nil {
-// 			return fmt.Errorf("익절 주문 실패: %w", err)
-// 		}
-// 	}
-
-// 	return nil
-// }
-
 // SetLeverage는 레버리지를 설정합니다
 func (c *Client) SetLeverage(ctx context.Context, symbol string, leverage int) error {
 	params := url.Values{}
@@ -614,4 +554,38 @@ func (c *Client) getServerTime() int64 {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return time.Now().UnixMilli() + c.serverTimeOffset
+}
+
+// GetOpenOrders는 현재 열린 주문 목록을 조회합니다
+func (c *Client) GetOpenOrders(ctx context.Context, symbol string) ([]OrderInfo, error) {
+	params := url.Values{}
+	if symbol != "" {
+		params.Add("symbol", symbol)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/openOrders", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("열린 주문 조회 실패: %w", err)
+	}
+
+	var orders []OrderInfo
+	if err := json.Unmarshal(resp, &orders); err != nil {
+		return nil, fmt.Errorf("주문 데이터 파싱 실패: %w", err)
+	}
+
+	return orders, nil
+}
+
+// CancelOrder는 주문을 취소합니다
+func (c *Client) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("orderId", strconv.FormatInt(orderID, 10))
+
+	_, err := c.doRequest(ctx, http.MethodDelete, "/fapi/v1/order", params, true)
+	if err != nil {
+		return fmt.Errorf("주문 취소 실패: %w", err)
+	}
+
+	return nil
 }

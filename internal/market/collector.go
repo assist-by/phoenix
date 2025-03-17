@@ -222,14 +222,14 @@ func (c *Collector) Collect(ctx context.Context) error {
 	return nil
 }
 
-// calculatePosition은 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기와 수량을 계산합니다
+// CalculatePosition은 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기와 수량을 계산합니다
 // 단계별 계산:
 // 1. 이론적 최대 포지션 = 가용잔고 × 레버리지
 // 2. 이론적 최대 수량 = 이론적 최대 포지션 ÷ 코인 가격
 // 3. 실제 수량 = 이론적 최대 수량을 최소 주문 단위로 내림
 // 4. 실제 포지션 가치 = 실제 수량 × 코인 가격
 // 5. 수수료 및 마진 고려해 최종 조정
-func (c *Collector) calculatePosition(
+func (c *Collector) CalculatePosition(
 	balance float64, // 가용 잔고
 	leverage int, // 레버리지
 	coinPrice float64, // 코인 현재 가격
@@ -388,7 +388,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 	}
 
 	// 5. 포지션 크기 계산
-	positionResult := c.calculatePosition(
+	positionResult := c.CalculatePosition(
 		usdtBalance.Available,
 		leverage,
 		coinSignal.Price,
@@ -447,7 +447,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 
 	// 6. 주문 수량 정밀도 조정 (StepSize 기준)
 	originalQuantity := result.Quantity
-	adjustedQuantity := adjustQuantity(originalQuantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision)
+	adjustedQuantity := AdjustQuantity(originalQuantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision)
 
 	c.discord.SendInfo(fmt.Sprintf("주문 수량 계산: %s, 원래 수량=%f, 조정된 수량=%f, stepSize=%.8f, 정밀도=%d",
 		s.Symbol, originalQuantity, adjustedQuantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision))
@@ -666,8 +666,8 @@ func (c *Collector) placeTPSLOrders(ctx context.Context, s *signal.Signal, quant
 	return nil
 }
 
-// adjustQuantity는 바이낸스 최소 단위(stepSize)에 맞게 수량을 조정합니다
-func adjustQuantity(quantity float64, stepSize float64, precision int) float64 {
+// AdjustQuantity는 바이낸스 최소 단위(stepSize)에 맞게 수량을 조정합니다
+func AdjustQuantity(quantity float64, stepSize float64, precision int) float64 {
 	if stepSize == 0 {
 		return quantity // stepSize가 0이면 조정 불필요
 	}

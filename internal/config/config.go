@@ -40,6 +40,9 @@ type Config struct {
 		Symbols         []string      `envconfig:"SYMBOLS" default:""`              // 커스텀 심볼 목록
 		UseTopSymbols   bool          `envconfig:"USE_TOP_SYMBOLS" default:"false"` // 거래량 상위 심볼 사용 여부
 		TopSymbolsCount int           `envconfig:"TOP_SYMBOLS_COUNT" default:"3"`   // 거래량 상위 심볼 개수
+
+		// Buy Mode 설정 추가
+		BuyMode bool `envconfig:"BUY_MODE" default:"false"`
 	}
 
 	// 거래 설정

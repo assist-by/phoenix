@@ -143,3 +143,18 @@ type EntryCheckResult struct {
 	PositionValue float64 // 포지션 크기 (USDT)
 	Quantity      float64 // 구매/판매 수량 (코인)
 }
+
+// OrderInfo는 주문 정보를 표현합니다
+type OrderInfo struct {
+	OrderID          int64   `json:"orderId"`
+	Symbol           string  `json:"symbol"`
+	Status           string  `json:"status"`
+	ClientOrderID    string  `json:"clientOrderId"`
+	Price            float64 `json:"price,string"`
+	OrigQuantity     float64 `json:"origQty,string"`
+	ExecutedQuantity float64 `json:"executedQty,string"`
+	Type             string  `json:"type"`
+	Side             string  `json:"side"`
+	PositionSide     string  `json:"positionSide"`
+	StopPrice        float64 `json:"stopPrice,string"`
+}
