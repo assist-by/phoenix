@@ -447,13 +447,6 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 	log.Printf("매수 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
 		symbol, adjustedQuantity, orderResponse.OrderID)
 
-	// // 주문 설정 알림
-	// if err := t.discord.SendInfo(fmt.Sprintf(
-	// 	"주문 실행 완료: %s\n주문 ID: %d\n수량: %.8f\n레버리지: %dx",
-	// 	symbol, orderResponse.OrderID, adjustedQuantity, leverage)); err != nil {
-	// 	log.Printf("주문 알림 전송 실패: %v", err)
-	// }
-
 	// 12. 포지션 확인 및 TP/SL 설정
 	// 포지션이 실제로 생성되었는지 확인
 	maxRetries := 5

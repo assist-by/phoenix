@@ -900,7 +900,7 @@ type BuyTask struct {
 	config   *config.Config
 }
 
-// Execute는 1회 매수 작업을 실행합니다
+// BuyTask의 Execute 함수 시작 부분에 추가
 func (t *BuyTask) Execute(ctx context.Context) error {
 	// 심볼 설정 (BTCUSDT 고정)
 	symbol := "BTCUSDT"
@@ -908,6 +908,40 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 	// 작업 시작 알림
 	if err := t.discord.SendInfo(fmt.Sprintf("🚀 %s 1회 매수 시작", symbol)); err != nil {
 		log.Printf("작업 시작 알림 전송 실패: %v", err)
+	}
+
+	// 1. 기존 포지션 확인
+	positions, err := t.client.GetPositions(ctx)
+	if err != nil {
+		return fmt.Errorf("포지션 조회 실패: %w", err)
+	}
+
+	// 기존 포지션이 있는지 확인
+	for _, pos := range positions {
+		if pos.Symbol == symbol && pos.Quantity != 0 {
+			return fmt.Errorf("이미 %s에 대한 포지션이 있습니다. 수량: %.8f, 방향: %s",
+				pos.Symbol, pos.Quantity, pos.PositionSide)
+		}
+	}
+
+	// 2. 열린 주문 확인
+	openOrders, err := t.client.GetOpenOrders(ctx, symbol)
+	if err != nil {
+		return fmt.Errorf("주문 조회 실패: %w", err)
+	}
+
+	// 기존 TP/SL 주문이 있는지 확인
+	if len(openOrders) > 0 {
+		// 기존 주문 취소
+		log.Printf("기존 주문 %d개를 취소합니다.", len(openOrders))
+		for _, order := range openOrders {
+			if err := t.client.CancelOrder(ctx, symbol, order.OrderID); err != nil {
+				log.Printf("주문 취소 실패 (ID: %d): %v", order.OrderID, err)
+				// 취소 실패해도 계속 진행
+			} else {
+				log.Printf("주문 취소 성공: %s %s (ID: %d)", order.Type, order.Side, order.OrderID)
+			}
+		}
 	}
 
 	// 매수 실행 로직
@@ -1151,7 +1185,7 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 	}
 
 	// 16. 최종 열린 주문 확인
-	openOrders, err := t.client.GetOpenOrders(ctx, symbol)
+	openOrders, err = t.client.GetOpenOrders(ctx, symbol)
 	if err != nil {
 		log.Printf("열린 주문 조회 실패: %v", err)
 		// 오류가 발생해도 계속 진행
@@ -3358,6 +3392,20 @@ func (c *Client) GetOpenOrders(ctx context.Context, symbol string) ([]OrderInfo,
 	}
 
 	return orders, nil
+}
+
+// CancelOrder는 주문을 취소합니다
+func (c *Client) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("orderId", strconv.FormatInt(orderID, 10))
+
+	_, err := c.doRequest(ctx, http.MethodDelete, "/fapi/v1/order", params, true)
+	if err != nil {
+		return fmt.Errorf("주문 취소 실패: %w", err)
+	}
+
+	return nil
 }
 
 ```
