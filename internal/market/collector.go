@@ -506,6 +506,8 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 13. TP/SL 값 설정
 	//---------------------------------
+	// 종료 주문을 위한 반대 방향 계산
+
 	actualEntryPrice := position.EntryPrice
 	actualQuantity := position.Quantity
 
@@ -537,10 +539,14 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 14. TP/SL 주문 생성
 	//---------------------------------
+	oppositeSide := Sell
+	if s.Type == signal.Short {
+		oppositeSide = Buy
+	}
 	// 손절 주문 생성
 	slOrder := OrderRequest{
 		Symbol:       s.Symbol,
-		Side:         orderSide,
+		Side:         oppositeSide,
 		PositionSide: positionSide,
 		Type:         StopMarket,
 		Quantity:     actualQuantity,
@@ -556,7 +562,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 익절 주문 생성
 	tpOrder := OrderRequest{
 		Symbol:       s.Symbol,
-		Side:         orderSide,
+		Side:         oppositeSide,
 		PositionSide: positionSide,
 		Type:         TakeProfitMarket,
 		Quantity:     actualQuantity,
