@@ -26,11 +26,6 @@ type CollectorTask struct {
 
 // Execute는 데이터 수집 작업을 실행합니다
 func (t *CollectorTask) Execute(ctx context.Context) error {
-	// 작업 시작 알림
-	if err := t.discord.SendInfo("📊 데이터 수집 시작"); err != nil {
-		log.Printf("작업 시작 알림 전송 실패: %v", err)
-	}
-
 	// 데이터 수집 실행
 	if err := t.collector.Collect(ctx); err != nil {
 		if err := t.discord.SendError(err); err != nil {
