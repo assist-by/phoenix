@@ -509,7 +509,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 종료 주문을 위한 반대 방향 계산
 
 	actualEntryPrice := position.EntryPrice
-	actualQuantity := position.Quantity
+	actualQuantity := math.Abs(position.Quantity)
 
 	var stopLoss, takeProfit float64
 	if s.Type == signal.Long {
