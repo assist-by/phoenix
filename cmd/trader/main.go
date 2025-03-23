@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -38,6 +39,14 @@ func (t *CollectorTask) Execute(ctx context.Context) error {
 }
 
 func main() {
+	// 명령줄 플래그 정의
+	buyModeFlag := flag.Bool("buymode", false, "1회 매수 후 종료")
+	testLongFlag := flag.Bool("testlong", false, "롱 포지션 테스트 후 종료")
+	testShortFlag := flag.Bool("testshort", false, "숏 포지션 테스트 후 종료")
+
+	// 플래그 파싱
+	flag.Parse()
+
 	// 컨텍스트 생성
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -105,7 +114,7 @@ func main() {
 		MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
 	})
 
-	if cfg.App.BuyMode {
+	if *buyModeFlag {
 		// Buy Mode 실행
 		log.Println("Buy Mode 활성화: 1회 매수 후 종료합니다")
 
@@ -128,6 +137,86 @@ func main() {
 
 		// 매수 성공 알림 및 종료
 		if err := discordClient.SendInfo("✅ 1회 매수 실행 완료. 프로그램을 종료합니다."); err != nil {
+			log.Printf("종료 알림 전송 실패: %v", err)
+		}
+
+		log.Println("프로그램을 종료합니다.")
+		os.Exit(0)
+	}
+
+	// 테스트 모드 실행 (플래그 기반)
+	if *testLongFlag || *testShortFlag {
+		testType := "Long"
+		signalType := signal.Long
+
+		if *testShortFlag {
+			testType = "Short"
+			signalType = signal.Short
+		}
+
+		// 테스트할 심볼
+		symbol := "BTCUSDT"
+
+		// 현재 가격 정보 가져오기
+		candles, err := binanceClient.GetKlines(ctx, symbol, "1m", 1)
+		if err != nil {
+			log.Fatalf("가격 정보 조회 실패: %v", err)
+		}
+		currentPrice := candles[0].Close
+
+		// 테스트 시그널 생성
+		var testSignal *signal.Signal
+
+		if signalType == signal.Long {
+			testSignal = &signal.Signal{
+				Type:       signal.Long,
+				Symbol:     symbol,
+				Price:      currentPrice,
+				Timestamp:  time.Now(),
+				StopLoss:   currentPrice * 0.99, // 가격의 99% (1% 손절)
+				TakeProfit: currentPrice * 1.01, // 가격의 101% (1% 익절)
+			}
+		} else {
+			testSignal = &signal.Signal{
+				Type:       signal.Short,
+				Symbol:     symbol,
+				Price:      currentPrice,
+				Timestamp:  time.Now(),
+				StopLoss:   currentPrice * 1.01, // 가격의 101% (1% 손절)
+				TakeProfit: currentPrice * 0.99, // 가격의 99% (1% 익절)
+			}
+		}
+
+		// 시그널 알림 전송
+		if err := discordClient.SendSignal(testSignal); err != nil {
+			log.Printf("시그널 알림 전송 실패: %v", err)
+		}
+
+		// 데이터 수집기 생성
+		collector := market.NewCollector(
+			binanceClient,
+			discordClient,
+			detector,
+			cfg,
+			market.WithRetryConfig(market.RetryConfig{
+				MaxRetries: 3,
+				BaseDelay:  1 * time.Second,
+				MaxDelay:   30 * time.Second,
+				Factor:     2.0,
+			}),
+		)
+
+		// executeSignalTrade 직접 호출
+		if err := collector.ExecuteSignalTrade(ctx, testSignal); err != nil {
+			log.Printf("테스트 매매 실행 중 에러 발생: %v", err)
+			if err := discordClient.SendError(err); err != nil {
+				log.Printf("에러 알림 전송 실패: %v", err)
+			}
+			os.Exit(1)
+		}
+
+		// 테스트 성공 알림 및 종료
+		if err := discordClient.SendInfo(fmt.Sprintf("✅ 테스트 %s 실행 완료. 프로그램을 종료합니다.", testType)); err != nil {
 			log.Printf("종료 알림 전송 실패: %v", err)
 		}
 
