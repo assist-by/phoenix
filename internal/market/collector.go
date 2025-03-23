@@ -172,7 +172,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 					if result {
 						// 매매 실행
-						if err := c.executeSignalTrade(ctx, s); err != nil {
+						if err := c.ExecuteSignalTrade(ctx, s); err != nil {
 							c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
 						} else {
 							log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
@@ -311,8 +311,8 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 }
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
-// executeSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
-func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) error {
+// ExecuteSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
+func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) error {
 	if s.Type == signal.NoSignal {
 		return nil // 시그널이 없으면 아무것도 하지 않음
 	}
