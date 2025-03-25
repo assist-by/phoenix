@@ -111,8 +111,8 @@ func (c *Collector) Collect(ctx context.Context) error {
 	balanceInfo := "현재 보유 잔고:\n"
 	for asset, balance := range balances {
 		if balance.Available > 0 || balance.Locked > 0 {
-			balanceInfo += fmt.Sprintf("%s: 사용가능: %.8f, 잠금: %.8f\n",
-				asset, balance.Available, balance.Locked)
+			balanceInfo += fmt.Sprintf("%s: 총: %.8f, 사용가능: %.8f, 잠금: %.8f\n",
+				asset, balance.CrossWalletBalance, balance.Available, balance.Locked)
 		}
 	}
 	if c.discord != nil {
@@ -202,13 +202,18 @@ func (c *Collector) Collect(ctx context.Context) error {
 // 5. 수수료 및 마진 고려해 최종 조정
 func (c *Collector) CalculatePosition(
 	balance float64, // 가용 잔고
+	totalBalance float64, // 총 잔고 (usdtBalance.CrossWalletBalance)
 	leverage int, // 레버리지
 	coinPrice float64, // 코인 현재 가격
 	stepSize float64, // 코인 최소 주문 단위
 	maintMargin float64, // 유지증거금률
 ) PositionSizeResult {
-	// 1. 사용 가능한 잔고에서 안전 비율만 사용 (90%)
-	safeBalance := balance * 0.9
+	// 1. 사용 가능한 잔고에서 항상 50%만 사용
+	maxAllocationPercent := 0.5
+	allocatedBalance := totalBalance * maxAllocationPercent
+
+	// 단, 가용 잔고보다 큰 금액은 사용할 수 없음
+	safeBalance := math.Min(balance, allocatedBalance)
 
 	// 2. 레버리지 적용 및 수수료 고려
 	totalFeeRate := 0.002 // 0.2% (진입 + 청산 수수료 + 여유분)
@@ -320,7 +325,12 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 1. 잔고 조회
 	//---------------------------------
-	balances, err := c.client.GetBalance(ctx)
+	var balances map[string]Balance
+	err := c.withRetry(ctx, "잔고 조회", func() error {
+		var err error
+		balances, err = c.client.GetBalance(ctx)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("잔고 조회 실패: %w", err)
 	}
@@ -336,7 +346,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 3. 현재 가격 조회 (최근 캔들 사용)
 	//---------------------------------
-	candles, err := c.client.GetKlines(ctx, s.Symbol, "1m", 1)
+	var candles []CandleData
+	err = c.withRetry(ctx, "현재 가격 조회", func() error {
+		candles, err = c.client.GetKlines(ctx, s.Symbol, "1m", 1)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("가격 정보 조회 실패: %w", err)
 	}
@@ -348,7 +362,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 4. 심볼 정보 조회
 	//---------------------------------
-	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
+	var symbolInfo *SymbolInfo
+	err = c.withRetry(ctx, "현재 가격 조회", func() error {
+		symbolInfo, err = c.client.GetSymbolInfo(ctx, s.Symbol)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
 	}
@@ -356,7 +374,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 5. HEDGE 모드 설정
 	//---------------------------------
-	if err := c.client.SetPositionMode(ctx, true); err != nil {
+	err = c.withRetry(ctx, "HEDGE 모드 설정", func() error {
+		err = c.client.SetPositionMode(ctx, true)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("HEDGE 모드 설정 실패: %w", err)
 	}
 
@@ -364,7 +386,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 6. 레버리지 설정
 	//---------------------------------
 	leverage := c.config.Trading.Leverage
-	if err := c.client.SetLeverage(ctx, s.Symbol, leverage); err != nil {
+	err = c.withRetry(ctx, "레버리지 설정", func() error {
+		err = c.client.SetLeverage(ctx, s.Symbol, leverage)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("레버리지 설정 실패: %w", err)
 	}
 
@@ -372,7 +398,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 7. 매수 수량 계산 (잔고의 90% 사용)
 	//---------------------------------
 	// 레버리지 브라켓 정보 조회
-	brackets, err := c.client.GetLeverageBrackets(ctx, s.Symbol)
+	var brackets []SymbolBrackets
+	err = c.withRetry(ctx, "매수 수량 계산", func() error {
+		brackets, err = c.client.GetLeverageBrackets(ctx, s.Symbol)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
 	}
@@ -399,6 +429,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 포지션 크기 계산
 	positionResult := c.CalculatePosition(
 		usdtBalance.Available,
+		usdtBalance.CrossWalletBalance,
 		leverage,
 		currentPrice,
 		symbolInfo.StepSize,
@@ -440,7 +471,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 10. 진입 주문 실행
 	//---------------------------------
-	orderResponse, err := c.client.PlaceOrder(ctx, entryOrder)
+	var orderResponse *OrderResponse
+	err = c.withRetry(ctx, "진입 주문 실행", func() error {
+		orderResponse, err = c.client.PlaceOrder(ctx, entryOrder)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("주문 실행 실패: %w", err)
 	}
@@ -465,7 +500,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		positions, err := c.client.GetPositions(ctx)
+		var positions []PositionInfo
+		err = c.withRetry(ctx, "포지션 조회", func() error {
+			positions, err = c.client.GetPositions(ctx)
+			return err
+		})
 		if err != nil {
 			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(retryInterval)
@@ -553,7 +592,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 		StopPrice:    adjustStopLoss,
 	}
 	// 손절 주문 실행
-	slResponse, err := c.client.PlaceOrder(ctx, slOrder)
+	var slResponse *OrderResponse
+	err = c.withRetry(ctx, "손절 주문 실행", func() error {
+		slResponse, err = c.client.PlaceOrder(ctx, slOrder)
+		return err
+	})
 	if err != nil {
 		log.Printf("손절(SL) 주문 실패: %v", err)
 		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
@@ -569,7 +612,11 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 		StopPrice:    adjustTakeProfit,
 	}
 	// 익절 주문 실행
-	tpResponse, err := c.client.PlaceOrder(ctx, tpOrder)
+	var tpResponse *OrderResponse
+	err = c.withRetry(ctx, "익절 주문 실행", func() error {
+		tpResponse, err = c.client.PlaceOrder(ctx, tpOrder)
+		return err
+	})
 	if err != nil {
 		log.Printf("익절(TP) 주문 실패: %v", err)
 		return fmt.Errorf("익절(TP) 주문 실패: %w", err)

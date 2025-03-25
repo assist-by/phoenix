@@ -610,6 +610,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"math"
@@ -634,11 +635,6 @@ type CollectorTask struct {
 
 // Execute는 데이터 수집 작업을 실행합니다
 func (t *CollectorTask) Execute(ctx context.Context) error {
-	// 작업 시작 알림
-	if err := t.discord.SendInfo("📊 데이터 수집 시작"); err != nil {
-		log.Printf("작업 시작 알림 전송 실패: %v", err)
-	}
-
 	// 데이터 수집 실행
 	if err := t.collector.Collect(ctx); err != nil {
 		if err := t.discord.SendError(err); err != nil {
@@ -651,6 +647,14 @@ func (t *CollectorTask) Execute(ctx context.Context) error {
 }
 
 func main() {
+	// 명령줄 플래그 정의
+	buyModeFlag := flag.Bool("buymode", false, "1회 매수 후 종료")
+	testLongFlag := flag.Bool("testlong", false, "롱 포지션 테스트 후 종료")
+	testShortFlag := flag.Bool("testshort", false, "숏 포지션 테스트 후 종료")
+
+	// 플래그 파싱
+	flag.Parse()
+
 	// 컨텍스트 생성
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -718,7 +722,7 @@ func main() {
 		MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
 	})
 
-	if cfg.App.BuyMode {
+	if *buyModeFlag {
 		// Buy Mode 실행
 		log.Println("Buy Mode 활성화: 1회 매수 후 종료합니다")
 
@@ -741,6 +745,86 @@ func main() {
 
 		// 매수 성공 알림 및 종료
 		if err := discordClient.SendInfo("✅ 1회 매수 실행 완료. 프로그램을 종료합니다."); err != nil {
+			log.Printf("종료 알림 전송 실패: %v", err)
+		}
+
+		log.Println("프로그램을 종료합니다.")
+		os.Exit(0)
+	}
+
+	// 테스트 모드 실행 (플래그 기반)
+	if *testLongFlag || *testShortFlag {
+		testType := "Long"
+		signalType := signal.Long
+
+		if *testShortFlag {
+			testType = "Short"
+			signalType = signal.Short
+		}
+
+		// 테스트할 심볼
+		symbol := "BTCUSDT"
+
+		// 현재 가격 정보 가져오기
+		candles, err := binanceClient.GetKlines(ctx, symbol, "1m", 1)
+		if err != nil {
+			log.Fatalf("가격 정보 조회 실패: %v", err)
+		}
+		currentPrice := candles[0].Close
+
+		// 테스트 시그널 생성
+		var testSignal *signal.Signal
+
+		if signalType == signal.Long {
+			testSignal = &signal.Signal{
+				Type:       signal.Long,
+				Symbol:     symbol,
+				Price:      currentPrice,
+				Timestamp:  time.Now(),
+				StopLoss:   currentPrice * 0.99, // 가격의 99% (1% 손절)
+				TakeProfit: currentPrice * 1.01, // 가격의 101% (1% 익절)
+			}
+		} else {
+			testSignal = &signal.Signal{
+				Type:       signal.Short,
+				Symbol:     symbol,
+				Price:      currentPrice,
+				Timestamp:  time.Now(),
+				StopLoss:   currentPrice * 1.01, // 가격의 101% (1% 손절)
+				TakeProfit: currentPrice * 0.99, // 가격의 99% (1% 익절)
+			}
+		}
+
+		// 시그널 알림 전송
+		if err := discordClient.SendSignal(testSignal); err != nil {
+			log.Printf("시그널 알림 전송 실패: %v", err)
+		}
+
+		// 데이터 수집기 생성
+		collector := market.NewCollector(
+			binanceClient,
+			discordClient,
+			detector,
+			cfg,
+			market.WithRetryConfig(market.RetryConfig{
+				MaxRetries: 3,
+				BaseDelay:  1 * time.Second,
+				MaxDelay:   30 * time.Second,
+				Factor:     2.0,
+			}),
+		)
+
+		// executeSignalTrade 직접 호출
+		if err := collector.ExecuteSignalTrade(ctx, testSignal); err != nil {
+			log.Printf("테스트 매매 실행 중 에러 발생: %v", err)
+			if err := discordClient.SendError(err); err != nil {
+				log.Printf("에러 알림 전송 실패: %v", err)
+			}
+			os.Exit(1)
+		}
+
+		// 테스트 성공 알림 및 종료
+		if err := discordClient.SendInfo(fmt.Sprintf("✅ 테스트 %s 실행 완료. 프로그램을 종료합니다.", testType)); err != nil {
 			log.Printf("종료 알림 전송 실패: %v", err)
 		}
 
@@ -1018,6 +1102,7 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 	// 포지션 크기 계산
 	positionResult := collector.CalculatePosition(
 		usdtBalance.Available,
+		usdtBalance.CrossWalletBalance,
 		leverage,
 		currentPrice,
 		symbolInfo.StepSize,
@@ -2737,9 +2822,6 @@ type Config struct {
 		Symbols         []string      `envconfig:"SYMBOLS" default:""`              // 커스텀 심볼 목록
 		UseTopSymbols   bool          `envconfig:"USE_TOP_SYMBOLS" default:"false"` // 거래량 상위 심볼 사용 여부
 		TopSymbolsCount int           `envconfig:"TOP_SYMBOLS_COUNT" default:"3"`   // 거래량 상위 심볼 개수
-
-		// Buy Mode 설정 추가
-		BuyMode bool `envconfig:"BUY_MODE" default:"false"`
 	}
 
 	// 거래 설정
@@ -3517,8 +3599,8 @@ func (c *Collector) Collect(ctx context.Context) error {
 	balanceInfo := "현재 보유 잔고:\n"
 	for asset, balance := range balances {
 		if balance.Available > 0 || balance.Locked > 0 {
-			balanceInfo += fmt.Sprintf("%s: 사용가능: %.8f, 잠금: %.8f\n",
-				asset, balance.Available, balance.Locked)
+			balanceInfo += fmt.Sprintf("%s: 총: %.8f, 사용가능: %.8f, 잠금: %.8f\n",
+				asset, balance.CrossWalletBalance, balance.Available, balance.Locked)
 		}
 	}
 	if c.discord != nil {
@@ -3578,7 +3660,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 					if result {
 						// 매매 실행
-						if err := c.executeSignalTrade(ctx, s); err != nil {
+						if err := c.ExecuteSignalTrade(ctx, s); err != nil {
 							c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
 						} else {
 							log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
@@ -3608,13 +3690,18 @@ func (c *Collector) Collect(ctx context.Context) error {
 // 5. 수수료 및 마진 고려해 최종 조정
 func (c *Collector) CalculatePosition(
 	balance float64, // 가용 잔고
+	totalBalance float64, // 총 잔고 (usdtBalance.CrossWalletBalance)
 	leverage int, // 레버리지
 	coinPrice float64, // 코인 현재 가격
 	stepSize float64, // 코인 최소 주문 단위
 	maintMargin float64, // 유지증거금률
 ) PositionSizeResult {
-	// 1. 사용 가능한 잔고에서 안전 비율만 사용 (90%)
-	safeBalance := balance * 0.9
+	// 1. 사용 가능한 잔고에서 항상 50%만 사용
+	maxAllocationPercent := 0.5
+	allocatedBalance := totalBalance * maxAllocationPercent
+
+	// 단, 가용 잔고보다 큰 금액은 사용할 수 없음
+	safeBalance := math.Min(balance, allocatedBalance)
 
 	// 2. 레버리지 적용 및 수수료 고려
 	totalFeeRate := 0.002 // 0.2% (진입 + 청산 수수료 + 여유분)
@@ -3717,8 +3804,8 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 }
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
-// executeSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
-func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) error {
+// ExecuteSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
+func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) error {
 	if s.Type == signal.NoSignal {
 		return nil // 시그널이 없으면 아무것도 하지 않음
 	}
@@ -3726,7 +3813,12 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 1. 잔고 조회
 	//---------------------------------
-	balances, err := c.client.GetBalance(ctx)
+	var balances map[string]Balance
+	err := c.withRetry(ctx, "잔고 조회", func() error {
+		var err error
+		balances, err = c.client.GetBalance(ctx)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("잔고 조회 실패: %w", err)
 	}
@@ -3742,7 +3834,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 3. 현재 가격 조회 (최근 캔들 사용)
 	//---------------------------------
-	candles, err := c.client.GetKlines(ctx, s.Symbol, "1m", 1)
+	var candles []CandleData
+	err = c.withRetry(ctx, "현재 가격 조회", func() error {
+		candles, err = c.client.GetKlines(ctx, s.Symbol, "1m", 1)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("가격 정보 조회 실패: %w", err)
 	}
@@ -3754,7 +3850,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 4. 심볼 정보 조회
 	//---------------------------------
-	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
+	var symbolInfo *SymbolInfo
+	err = c.withRetry(ctx, "현재 가격 조회", func() error {
+		symbolInfo, err = c.client.GetSymbolInfo(ctx, s.Symbol)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
 	}
@@ -3762,7 +3862,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 5. HEDGE 모드 설정
 	//---------------------------------
-	if err := c.client.SetPositionMode(ctx, true); err != nil {
+	err = c.withRetry(ctx, "HEDGE 모드 설정", func() error {
+		err = c.client.SetPositionMode(ctx, true)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("HEDGE 모드 설정 실패: %w", err)
 	}
 
@@ -3770,7 +3874,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 6. 레버리지 설정
 	//---------------------------------
 	leverage := c.config.Trading.Leverage
-	if err := c.client.SetLeverage(ctx, s.Symbol, leverage); err != nil {
+	err = c.withRetry(ctx, "레버리지 설정", func() error {
+		err = c.client.SetLeverage(ctx, s.Symbol, leverage)
+		return err
+	})
+	if err != nil {
 		return fmt.Errorf("레버리지 설정 실패: %w", err)
 	}
 
@@ -3778,7 +3886,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 7. 매수 수량 계산 (잔고의 90% 사용)
 	//---------------------------------
 	// 레버리지 브라켓 정보 조회
-	brackets, err := c.client.GetLeverageBrackets(ctx, s.Symbol)
+	var brackets []SymbolBrackets
+	err = c.withRetry(ctx, "매수 수량 계산", func() error {
+		brackets, err = c.client.GetLeverageBrackets(ctx, s.Symbol)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
 	}
@@ -3805,6 +3917,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 포지션 크기 계산
 	positionResult := c.CalculatePosition(
 		usdtBalance.Available,
+		usdtBalance.CrossWalletBalance,
 		leverage,
 		currentPrice,
 		symbolInfo.StepSize,
@@ -3846,7 +3959,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	// 10. 진입 주문 실행
 	//---------------------------------
-	orderResponse, err := c.client.PlaceOrder(ctx, entryOrder)
+	var orderResponse *OrderResponse
+	err = c.withRetry(ctx, "진입 주문 실행", func() error {
+		orderResponse, err = c.client.PlaceOrder(ctx, entryOrder)
+		return err
+	})
 	if err != nil {
 		return fmt.Errorf("주문 실행 실패: %w", err)
 	}
@@ -3871,7 +3988,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		positions, err := c.client.GetPositions(ctx)
+		var positions []PositionInfo
+		err = c.withRetry(ctx, "포지션 조회", func() error {
+			positions, err = c.client.GetPositions(ctx)
+			return err
+		})
 		if err != nil {
 			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(retryInterval)
@@ -3915,7 +4036,7 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 종료 주문을 위한 반대 방향 계산
 
 	actualEntryPrice := position.EntryPrice
-	actualQuantity := position.Quantity
+	actualQuantity := math.Abs(position.Quantity)
 
 	var stopLoss, takeProfit float64
 	if s.Type == signal.Long {
@@ -3959,7 +4080,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		StopPrice:    adjustStopLoss,
 	}
 	// 손절 주문 실행
-	slResponse, err := c.client.PlaceOrder(ctx, slOrder)
+	var slResponse *OrderResponse
+	err = c.withRetry(ctx, "손절 주문 실행", func() error {
+		slResponse, err = c.client.PlaceOrder(ctx, slOrder)
+		return err
+	})
 	if err != nil {
 		log.Printf("손절(SL) 주문 실패: %v", err)
 		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
@@ -3975,7 +4100,11 @@ func (c *Collector) executeSignalTrade(ctx context.Context, s *signal.Signal) er
 		StopPrice:    adjustTakeProfit,
 	}
 	// 익절 주문 실행
-	tpResponse, err := c.client.PlaceOrder(ctx, tpOrder)
+	var tpResponse *OrderResponse
+	err = c.withRetry(ctx, "익절 주문 실행", func() error {
+		tpResponse, err = c.client.PlaceOrder(ctx, tpOrder)
+		return err
+	})
 	if err != nil {
 		log.Printf("익절(TP) 주문 실패: %v", err)
 		return fmt.Errorf("익절(TP) 주문 실패: %w", err)

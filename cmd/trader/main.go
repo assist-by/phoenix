@@ -494,6 +494,7 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 	// 포지션 크기 계산
 	positionResult := collector.CalculatePosition(
 		usdtBalance.Available,
+		usdtBalance.CrossWalletBalance,
 		leverage,
 		currentPrice,
 		symbolInfo.StepSize,
