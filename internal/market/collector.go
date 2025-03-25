@@ -710,6 +710,14 @@ func (c *Collector) withRetry(ctx context.Context, operation string, fn func() e
 		default:
 			if err := fn(); err != nil {
 				lastErr = err
+
+				// 재시도 가능한 오류인지 확인
+				if !IsRetryableError(err) {
+					// 재시도가 필요 없는 오류는 바로 반환
+					log.Printf("%s 실패 (재시도 불필요): %v", operation, err)
+					return err
+				}
+
 				if attempt == c.retry.MaxRetries {
 					// 마지막 시도에서 실패하면 Discord로 에러 알림 전송
 					errMsg := fmt.Errorf("%s 실패 (최대 재시도 횟수 초과): %v", operation, err)
