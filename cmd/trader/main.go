@@ -492,7 +492,7 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 	}
 
 	// 포지션 크기 계산
-	positionResult := collector.CalculatePosition(
+	positionResult, err := collector.CalculatePosition(
 		usdtBalance.Available,
 		usdtBalance.CrossWalletBalance,
 		leverage,
@@ -500,6 +500,9 @@ func (t *BuyTask) Execute(ctx context.Context) error {
 		symbolInfo.StepSize,
 		bracket.MaintMarginRatio,
 	)
+	if err != nil {
+		return fmt.Errorf("포지션 계산 실패: %w", err)
+	}
 
 	// 최소 주문 가치 체크
 	if positionResult.PositionValue < symbolInfo.MinNotional {
