@@ -3057,9 +3057,14 @@ func (c *Client) GetBalance(ctx context.Context) (map[string]domain.Balance, err
 
 	var result struct {
 		Assets []struct {
-			Asset            string  `json:"asset"`
-			WalletBalance    float64 `json:"walletBalance,string"`
-			AvailableBalance float64 `json:"availableBalance,string"`
+			Asset              string  `json:"asset"`
+			WalletBalance      float64 `json:"walletBalance,string"`
+			UnrealizedProfit   float64 `json:"unrealizedProfit,string"`
+			MarginBalance      float64 `json:"marginBalance,string"`
+			AvailableBalance   float64 `json:"availableBalance,string"`
+			InitialMargin      float64 `json:"initialMargin,string"`
+			MaintMargin        float64 `json:"maintMargin,string"`
+			CrossWalletBalance float64 `json:"crossWalletBalance,string"`
 		} `json:"assets"`
 	}
 
@@ -3069,17 +3074,327 @@ func (c *Client) GetBalance(ctx context.Context) (map[string]domain.Balance, err
 
 	balances := make(map[string]domain.Balance)
 	for _, asset := range result.Assets {
+		// 잔고가 있는 자산만 포함 (0보다 큰 값)
 		if asset.WalletBalance > 0 {
 			balances[asset.Asset] = domain.Balance{
 				Asset:              asset.Asset,
 				Available:          asset.AvailableBalance,
 				Locked:             asset.WalletBalance - asset.AvailableBalance,
-				CrossWalletBalance: asset.WalletBalance,
+				CrossWalletBalance: asset.CrossWalletBalance,
 			}
 		}
 	}
 
 	return balances, nil
+}
+
+// GetPositions는 현재 열린 포지션을 조회합니다
+func (c *Client) GetPositions(ctx context.Context) ([]domain.Position, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v2/positionRisk", nil, true)
+	if err != nil {
+		return nil, fmt.Errorf("포지션 조회 실패: %w", err)
+	}
+
+	var positionsRaw []struct {
+		Symbol           string  `json:"symbol"`
+		PositionAmt      float64 `json:"positionAmt,string"`
+		EntryPrice       float64 `json:"entryPrice,string"`
+		MarkPrice        float64 `json:"markPrice,string"`
+		UnrealizedProfit float64 `json:"unRealizedProfit,string"`
+		LiquidationPrice float64 `json:"liquidationPrice,string"`
+		Leverage         float64 `json:"leverage,string"`
+		MaxNotionalValue float64 `json:"maxNotionalValue,string"`
+		MarginType       string  `json:"marginType"`
+		IsolatedMargin   float64 `json:"isolatedMargin,string"`
+		IsAutoAddMargin  string  `json:"isAutoAddMargin"`
+		PositionSide     string  `json:"positionSide"`
+		Notional         float64 `json:"notional,string"`
+		IsolatedWallet   float64 `json:"isolatedWallet,string"`
+		UpdateTime       int64   `json:"updateTime"`
+		InitialMargin    float64 `json:"initialMargin,string"`
+		MaintMargin      float64 `json:"maintMargin,string"`
+	}
+
+	if err := json.Unmarshal(resp, &positionsRaw); err != nil {
+		return nil, fmt.Errorf("포지션 데이터 파싱 실패: %w", err)
+	}
+
+	// 활성 포지션만 필터링 (수량이 0이 아닌 포지션)
+	var positions []domain.Position
+	for _, p := range positionsRaw {
+		if p.PositionAmt != 0 {
+			leverage := int(p.Leverage)
+			position := domain.Position{
+				Symbol:        p.Symbol,
+				PositionSide:  domain.PositionSide(p.PositionSide),
+				Quantity:      p.PositionAmt,
+				EntryPrice:    p.EntryPrice,
+				MarkPrice:     p.MarkPrice,
+				UnrealizedPnL: p.UnrealizedProfit,
+				InitialMargin: p.InitialMargin,
+				MaintMargin:   p.MaintMargin,
+				Leverage:      leverage,
+			}
+			positions = append(positions, position)
+		}
+	}
+
+	return positions, nil
+}
+
+// GetOpenOrders는 현재 열린 주문 목록을 조회합니다
+func (c *Client) GetOpenOrders(ctx context.Context, symbol string) ([]domain.OrderResponse, error) {
+	params := url.Values{}
+	if symbol != "" {
+		params.Add("symbol", symbol)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/openOrders", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("열린 주문 조회 실패: %w", err)
+	}
+
+	var ordersRaw []struct {
+		OrderID       int64   `json:"orderId"`
+		Symbol        string  `json:"symbol"`
+		Status        string  `json:"status"`
+		ClientOrderID string  `json:"clientOrderId"`
+		Price         float64 `json:"price,string"`
+		AvgPrice      float64 `json:"avgPrice,string"`
+		OrigQty       float64 `json:"origQty,string"`
+		ExecutedQty   float64 `json:"executedQty,string"`
+		CumQuote      float64 `json:"cumQuote,string"`
+		TimeInForce   string  `json:"timeInForce"`
+		Type          string  `json:"type"`
+		ReduceOnly    bool    `json:"reduceOnly"`
+		ClosePosition bool    `json:"closePosition"`
+		Side          string  `json:"side"`
+		PositionSide  string  `json:"positionSide"`
+		StopPrice     float64 `json:"stopPrice,string"`
+		WorkingType   string  `json:"workingType"`
+		PriceProtect  bool    `json:"priceProtect"`
+		OrigType      string  `json:"origType"`
+		UpdateTime    int64   `json:"updateTime"`
+		Time          int64   `json:"time"`
+	}
+
+	if err := json.Unmarshal(resp, &ordersRaw); err != nil {
+		return nil, fmt.Errorf("주문 데이터 파싱 실패: %w", err)
+	}
+
+	orders := make([]domain.OrderResponse, len(ordersRaw))
+	for i, o := range ordersRaw {
+		orders[i] = domain.OrderResponse{
+			OrderID:          o.OrderID,
+			Symbol:           o.Symbol,
+			Status:           o.Status,
+			ClientOrderID:    o.ClientOrderID,
+			Price:            o.Price,
+			AvgPrice:         o.AvgPrice,
+			OrigQuantity:     o.OrigQty,
+			ExecutedQuantity: o.ExecutedQty,
+			Side:             domain.OrderSide(o.Side),
+			PositionSide:     domain.PositionSide(o.PositionSide),
+			Type:             domain.OrderType(o.Type),
+			CreateTime:       time.Unix(0, o.Time*int64(time.Millisecond)),
+		}
+	}
+
+	return orders, nil
+}
+
+// GetLeverageBrackets는 심볼의 레버리지 브라켓 정보를 조회합니다
+func (c *Client) GetLeverageBrackets(ctx context.Context, symbol string) ([]domain.LeverageBracket, error) {
+	params := url.Values{}
+	if symbol != "" {
+		params.Add("symbol", symbol)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/leverageBracket", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
+	}
+
+	// 응답 구조는 심볼 기준으로 다릅니다
+	// 단일 심볼 조회시: [{"symbol":"BTCUSDT","brackets":[...]}]
+	// 모든 심볼 조회시: [{"symbol":"BTCUSDT","brackets":[...]}, {"symbol":"ETHUSDT","brackets":[...]}]
+	var bracketsRaw []struct {
+		Symbol   string `json:"symbol"`
+		Brackets []struct {
+			Bracket          int     `json:"bracket"`
+			InitialLeverage  int     `json:"initialLeverage"`
+			NotionalCap      float64 `json:"notionalCap,string"`
+			NotionalFloor    float64 `json:"notionalFloor,string"`
+			MaintMarginRatio float64 `json:"maintMarginRatio,string"`
+			Cum              float64 `json:"cum,string"`
+		} `json:"brackets"`
+	}
+
+	if err := json.Unmarshal(resp, &bracketsRaw); err != nil {
+		return nil, fmt.Errorf("레버리지 브라켓 데이터 파싱 실패: %w", err)
+	}
+
+	// 결과 처리
+	var result []domain.LeverageBracket
+	for _, symbolBrackets := range bracketsRaw {
+
+		for _, b := range symbolBrackets.Brackets {
+			bracket := domain.LeverageBracket{
+				Bracket:          b.Bracket,
+				InitialLeverage:  b.InitialLeverage,
+				MaintMarginRatio: b.MaintMarginRatio,
+				Notional:         b.NotionalCap,
+			}
+			result = append(result, bracket)
+		}
+
+		// 특정 심볼만 요청했으면 첫 번째 항목만 필요
+		if symbol != "" {
+			break
+		}
+	}
+
+	return result, nil
+}
+
+// PlaceOrder는 새로운 주문을 생성합니다
+func (c *Client) PlaceOrder(ctx context.Context, order domain.OrderRequest) (*domain.OrderResponse, error) {
+	params := url.Values{}
+	params.Add("symbol", order.Symbol)
+	params.Add("side", string(order.Side))
+
+	if order.PositionSide != "" {
+		params.Add("positionSide", string(order.PositionSide))
+	}
+
+	switch order.Type {
+	case domain.Market:
+		params.Add("type", "MARKET")
+		if order.QuoteQuantity > 0 {
+			// USDT 금액으로 주문
+			params.Add("quoteOrderQty", strconv.FormatFloat(order.QuoteQuantity, 'f', -1, 64))
+		} else {
+			// 코인 수량으로 주문
+			params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		}
+
+	case domain.Limit:
+		params.Add("type", "LIMIT")
+		params.Add("timeInForce", order.TimeInForce)
+		if order.TimeInForce == "" {
+			params.Add("timeInForce", "GTC")
+		}
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("price", strconv.FormatFloat(order.Price, 'f', -1, 64))
+
+	case domain.StopMarket:
+		params.Add("type", "STOP_MARKET")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+
+	case domain.TakeProfitMarket:
+		params.Add("type", "TAKE_PROFIT_MARKET")
+		params.Add("quantity", strconv.FormatFloat(order.Quantity, 'f', -1, 64))
+		params.Add("stopPrice", strconv.FormatFloat(order.StopPrice, 'f', -1, 64))
+	}
+
+	// 클라이언트 주문 ID가 설정되었으면 추가
+	if order.ClientOrderID != "" {
+		params.Add("newClientOrderId", order.ClientOrderID)
+	}
+
+	resp, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/order", params, true)
+	if err != nil {
+		return nil, fmt.Errorf("주문 실행 실패 [심볼: %s, 타입: %s, 수량: %.8f]: %w",
+			order.Symbol, order.Type, order.Quantity, err)
+	}
+
+	var result struct {
+		OrderID       int64  `json:"orderId"`
+		Symbol        string `json:"symbol"`
+		Status        string `json:"status"`
+		ClientOrderID string `json:"clientOrderId"`
+		Price         string `json:"price"`
+		AvgPrice      string `json:"avgPrice"`
+		OrigQty       string `json:"origQty"`
+		ExecutedQty   string `json:"executedQty"`
+		Side          string `json:"side"`
+		PositionSide  string `json:"positionSide"`
+		Type          string `json:"type"`
+		UpdateTime    int64  `json:"updateTime"`
+		Time          int64  `json:"time"`
+	}
+
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("주문 응답 파싱 실패: %w", err)
+	}
+
+	// 문자열을 숫자로 변환
+	price, _ := strconv.ParseFloat(result.Price, 64)
+	avgPrice, _ := strconv.ParseFloat(result.AvgPrice, 64)
+	origQuantity, _ := strconv.ParseFloat(result.OrigQty, 64)
+	executedQuantity, _ := strconv.ParseFloat(result.ExecutedQty, 64)
+
+	return &domain.OrderResponse{
+		OrderID:          result.OrderID,
+		Symbol:           result.Symbol,
+		Status:           result.Status,
+		ClientOrderID:    result.ClientOrderID,
+		Price:            price,
+		AvgPrice:         avgPrice,
+		OrigQuantity:     origQuantity,
+		ExecutedQuantity: executedQuantity,
+		Side:             domain.OrderSide(result.Side),
+		PositionSide:     domain.PositionSide(result.PositionSide),
+		Type:             domain.OrderType(result.Type),
+		CreateTime:       time.Unix(0, result.Time*int64(time.Millisecond)),
+	}, nil
+}
+
+// CancelOrder는 주문을 취소합니다
+func (c *Client) CancelOrder(ctx context.Context, symbol string, orderID int64) error {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("orderId", strconv.FormatInt(orderID, 10))
+
+	_, err := c.doRequest(ctx, http.MethodDelete, "/fapi/v1/order", params, true)
+	if err != nil {
+		return fmt.Errorf("주문 취소 실패: %w", err)
+	}
+
+	return nil
+}
+
+// SetLeverage는 레버리지를 설정합니다
+func (c *Client) SetLeverage(ctx context.Context, symbol string, leverage int) error {
+	params := url.Values{}
+	params.Add("symbol", symbol)
+	params.Add("leverage", strconv.Itoa(leverage))
+
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/leverage", params, true)
+	if err != nil {
+		return fmt.Errorf("레버리지 설정 실패: %w", err)
+	}
+
+	return nil
+}
+
+// SetPositionMode는 포지션 모드를 설정합니다
+func (c *Client) SetPositionMode(ctx context.Context, hedgeMode bool) error {
+	params := url.Values{}
+	params.Add("dualSidePosition", strconv.FormatBool(hedgeMode))
+
+	_, err := c.doRequest(ctx, http.MethodPost, "/fapi/v1/positionSide/dual", params, true)
+	if err != nil {
+		// API 에러 타입 확인
+		if strings.Contains(err.Error(), "No need to change position side") {
+			// 이미 원하는 모드로 설정된 경우, 에러가 아님
+			return nil
+		}
+		return fmt.Errorf("포지션 모드 설정 실패: %w", err)
+	}
+
+	return nil
 }
 
 // SyncTime은 바이낸스 서버와 시간을 동기화합니다
@@ -3397,7 +3712,6 @@ func (c *Client) GetBalance(ctx context.Context) (map[string]Balance, error) {
 	return balances, nil
 }
 
-// PlaceOrder는 새로운 주문을 생성합니다
 // PlaceOrder는 새로운 주문을 생성합니다
 func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
 	params := url.Values{}
