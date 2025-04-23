@@ -251,7 +251,6 @@ func (c *Client) GetBalance(ctx context.Context) (map[string]Balance, error) {
 }
 
 // PlaceOrder는 새로운 주문을 생성합니다
-// PlaceOrder는 새로운 주문을 생성합니다
 func (c *Client) PlaceOrder(ctx context.Context, order OrderRequest) (*OrderResponse, error) {
 	params := url.Values{}
 	params.Add("symbol", order.Symbol)
