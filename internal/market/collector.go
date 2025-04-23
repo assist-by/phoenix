@@ -11,6 +11,8 @@ import (
 	"github.com/assist-by/phoenix/internal/analysis/indicator"
 	"github.com/assist-by/phoenix/internal/analysis/signal"
 	"github.com/assist-by/phoenix/internal/config"
+	"github.com/assist-by/phoenix/internal/domain"
+	"github.com/assist-by/phoenix/internal/exchange"
 	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 )
@@ -25,7 +27,7 @@ type RetryConfig struct {
 
 // Collector는 시장 데이터 수집기를 구현합니다
 type Collector struct {
-	client   *Client
+	exchange exchange.Exchange
 	discord  *discord.Client
 	detector *signal.Detector
 	config   *config.Config
@@ -35,9 +37,9 @@ type Collector struct {
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(client *Client, discord *discord.Client, detector *signal.Detector, config *config.Config, opts ...CollectorOption) *Collector {
+func NewCollector(exchange exchange.Exchange, discord *discord.Client, detector *signal.Detector, config *config.Config, opts ...CollectorOption) *Collector {
 	c := &Collector{
-		client:   client,
+		exchange: exchange,
 		discord:  discord,
 		detector: detector,
 		config:   config,
@@ -78,7 +80,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 	if c.config.App.UseTopSymbols {
 
-		symbols, err = c.client.GetTopVolumeSymbols(ctx, c.config.App.TopSymbolsCount)
+		symbols, err = c.exchange.GetTopVolumeSymbols(ctx, c.config.App.TopSymbolsCount)
 		if err != nil {
 			return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
 		}
@@ -94,7 +96,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 	// 각 심볼의 잔고 조회
 
-	balances, err := c.client.GetBalance(ctx)
+	balances, err := c.exchange.GetBalance(ctx)
 	if err != nil {
 		return err
 	}
@@ -116,7 +118,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 	// 각 심볼의 캔들 데이터 수집
 	for _, symbol := range symbols {
 		err := c.withRetry(ctx, fmt.Sprintf("%s 캔들 데이터 조회", symbol), func() error {
-			candles, err := c.client.GetKlines(ctx, symbol, c.getIntervalString(), c.config.App.CandleLimit)
+			candles, err := c.exchange.GetKlines(ctx, symbol, c.getIntervalString(), c.config.App.CandleLimit)
 			if err != nil {
 				return err
 			}
@@ -127,7 +129,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 			prices := make([]indicator.PriceData, len(candles))
 			for i, candle := range candles {
 				prices[i] = indicator.PriceData{
-					Time:   time.Unix(candle.OpenTime/1000, 0),
+					Time:   candle.OpenTime,
 					Open:   candle.Open,
 					High:   candle.High,
 					Low:    candle.Low,
@@ -250,8 +252,8 @@ func (c *Collector) CalculatePosition(
 	}, nil
 }
 
-// findBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
-func findBracket(brackets []LeverageBracket, leverage int) *LeverageBracket {
+// findDomainBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
+func findDomainBracket(brackets []domain.LeverageBracket, leverage int) *domain.LeverageBracket {
 	// 레버리지가 높은 순으로 정렬되어 있으므로,
 	// 설정된 레버리지보다 크거나 같은 첫 번째 브라켓을 찾습니다.
 	for i := len(brackets) - 1; i >= 0; i-- {
@@ -266,16 +268,15 @@ func findBracket(brackets []LeverageBracket, leverage int) *LeverageBracket {
 	}
 	return nil
 }
-
 func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, error) {
 	// 1. 현재 포지션 조회
-	positions, err := c.client.GetPositions(ctx)
+	positions, err := c.exchange.GetPositions(ctx)
 	if err != nil {
 		return false, fmt.Errorf("포지션 조회 실패: %w", err)
 	}
 
 	// 기존 포지션 확인
-	var existingPosition *PositionInfo
+	var existingPosition *domain.Position
 	for _, pos := range positions {
 		if pos.Symbol == coinSignal.Symbol && pos.Quantity != 0 {
 			existingPosition = &pos
@@ -339,7 +340,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 
 // cancelOpenOrders는 특정 심볼에 대한 모든 열린 주문을 취소합니다
 func (c *Collector) cancelOpenOrders(ctx context.Context, symbol string) (bool, error) {
-	openOrders, err := c.client.GetOpenOrders(ctx, symbol)
+	openOrders, err := c.exchange.GetOpenOrders(ctx, symbol)
 	if err != nil {
 		return false, fmt.Errorf("주문 조회 실패: %w", err)
 	}
@@ -348,7 +349,7 @@ func (c *Collector) cancelOpenOrders(ctx context.Context, symbol string) (bool, 
 	if len(openOrders) > 0 {
 		log.Printf("%s의 기존 주문 %d개를 취소합니다.", symbol, len(openOrders))
 		for _, order := range openOrders {
-			if err := c.client.CancelOrder(ctx, symbol, order.OrderID); err != nil {
+			if err := c.exchange.CancelOrder(ctx, symbol, order.OrderID); err != nil {
 				log.Printf("주문 취소 실패 (ID: %d): %v", order.OrderID, err)
 				return false, fmt.Errorf("주문 취소 실패 (ID: %d): %w", order.OrderID, err)
 			}
@@ -366,7 +367,7 @@ func (c *Collector) confirmPositionClosed(ctx context.Context, symbol string) (b
 	retryInterval := 1 * time.Second
 
 	for i := 0; i < maxRetries; i++ {
-		positions, err := c.client.GetPositions(ctx)
+		positions, err := c.exchange.GetPositions(ctx)
 		if err != nil {
 			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(retryInterval)
@@ -396,7 +397,7 @@ func (c *Collector) confirmPositionClosed(ctx context.Context, symbol string) (b
 }
 
 // closePositionAtMarket는 시장가로 포지션을 청산합니다
-func (c *Collector) closePositionAtMarket(ctx context.Context, position *PositionInfo) error {
+func (c *Collector) closePositionAtMarket(ctx context.Context, position *domain.Position) error {
 	// 포지션 방향에 따라 반대 주문 생성
 	side := Buy
 	positionSide := Long
@@ -413,16 +414,16 @@ func (c *Collector) closePositionAtMarket(ctx context.Context, position *Positio
 	quantity := math.Abs(position.Quantity)
 
 	// 시장가 청산 주문
-	closeOrder := OrderRequest{
+	closeOrder := domain.OrderRequest{
 		Symbol:       position.Symbol,
-		Side:         side,
-		PositionSide: positionSide,
-		Type:         Market,
+		Side:         domain.OrderSide(side),
+		PositionSide: domain.PositionSide(positionSide),
+		Type:         domain.Market,
 		Quantity:     quantity,
 	}
 
 	// 주문 실행
-	orderResponse, err := c.client.PlaceOrder(ctx, closeOrder)
+	orderResponse, err := c.exchange.PlaceOrder(ctx, closeOrder)
 	if err != nil {
 		return fmt.Errorf("포지션 청산 주문 실패: %w", err)
 	}
@@ -444,7 +445,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 1. 잔고 조회
 	//---------------------------------
 
-	balances, err := c.client.GetBalance(ctx)
+	balances, err := c.exchange.GetBalance(ctx)
 	if err != nil {
 		return fmt.Errorf("잔고 조회 실패: %w", err)
 	}
@@ -461,7 +462,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 3. 현재 가격 조회 (최근 캔들 사용)
 	//---------------------------------
 
-	candles, err := c.client.GetKlines(ctx, s.Symbol, "1m", 1)
+	candles, err := c.exchange.GetKlines(ctx, s.Symbol, "1m", 1)
 	if err != nil {
 		return fmt.Errorf("가격 정보 조회 실패: %w", err)
 	}
@@ -474,7 +475,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 4. 심볼 정보 조회
 	//---------------------------------
 
-	symbolInfo, err := c.client.GetSymbolInfo(ctx, s.Symbol)
+	symbolInfo, err := c.exchange.GetSymbolInfo(ctx, s.Symbol)
 
 	if err != nil {
 		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
@@ -484,7 +485,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 5. HEDGE 모드 설정
 	//---------------------------------
 
-	err = c.client.SetPositionMode(ctx, true)
+	err = c.exchange.SetPositionMode(ctx, true)
 
 	if err != nil {
 		return fmt.Errorf("HEDGE 모드 설정 실패: %w", err)
@@ -494,7 +495,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 6. 레버리지 설정
 	//---------------------------------
 	leverage := c.config.Trading.Leverage
-	err = c.client.SetLeverage(ctx, s.Symbol, leverage)
+	err = c.exchange.SetLeverage(ctx, s.Symbol, leverage)
 	if err != nil {
 		return fmt.Errorf("레버리지 설정 실패: %w", err)
 	}
@@ -503,26 +504,16 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 7. 매수 수량 계산 (잔고의 90% 사용)
 	//---------------------------------
 	// 레버리지 브라켓 정보 조회
-	brackets, err := c.client.GetLeverageBrackets(ctx, s.Symbol)
+	brackets, err := c.exchange.GetLeverageBrackets(ctx, s.Symbol)
 	if err != nil {
 		return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
 	}
 
-	// 해당 심볼의 브라켓 정보 찾기
-	var symbolBracket *SymbolBrackets
-	for _, b := range brackets {
-		if b.Symbol == s.Symbol {
-			symbolBracket = &b
-			break
-		}
-	}
-
-	if symbolBracket == nil || len(symbolBracket.Brackets) == 0 {
+	if len(brackets) == 0 {
 		return fmt.Errorf("레버리지 브라켓 정보가 없습니다")
 	}
 
-	// 설정된 레버리지에 맞는 브라켓 찾기
-	bracket := findBracket(symbolBracket.Brackets, leverage)
+	bracket := findDomainBracket(brackets, leverage)
 	if bracket == nil {
 		return fmt.Errorf("적절한 레버리지 브라켓을 찾을 수 없습니다")
 	}
@@ -564,18 +555,18 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 		positionSide = Short
 	}
 
-	entryOrder := OrderRequest{
+	entryOrder := domain.OrderRequest{
 		Symbol:       s.Symbol,
-		Side:         orderSide,
-		PositionSide: positionSide,
-		Type:         Market,
+		Side:         domain.OrderSide(orderSide),
+		PositionSide: domain.PositionSide(positionSide),
+		Type:         domain.Market,
 		Quantity:     adjustedQuantity,
 	}
 
 	//---------------------------------
 	// 10. 진입 주문 실행
 	//---------------------------------
-	orderResponse, err := c.client.PlaceOrder(ctx, entryOrder)
+	orderResponse, err := c.exchange.PlaceOrder(ctx, entryOrder)
 	if err != nil {
 		return fmt.Errorf("주문 실행 실패: %w", err)
 	}
@@ -591,17 +582,17 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	maxRetries := 5
 	retryInterval := 1 * time.Second
-	var position *PositionInfo
+	var position *domain.Position
 
 	// 목표 포지션 사이드 문자열로 변환
-	targetPositionSide := "LONG"
+	targetPositionSide := domain.LongPosition
 	if s.Type == signal.Short {
-		targetPositionSide = "SHORT"
+		targetPositionSide = domain.ShortPosition
 	}
 
 	for i := 0; i < maxRetries; i++ {
 
-		positions, err := c.client.GetPositions(ctx)
+		positions, err := c.exchange.GetPositions(ctx)
 		if err != nil {
 			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
 			time.Sleep(retryInterval)
@@ -613,9 +604,9 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 			if pos.Symbol == s.Symbol && pos.PositionSide == targetPositionSide {
 				// Long은 수량이 양수, Short은 음수이기 때문에 조건 분기
 				positionValid := false
-				if targetPositionSide == "LONG" && pos.Quantity > 0 {
+				if targetPositionSide == domain.LongPosition && pos.Quantity > 0 {
 					positionValid = true
-				} else if targetPositionSide == "SHORT" && pos.Quantity < 0 {
+				} else if targetPositionSide == domain.ShortPosition && pos.Quantity < 0 {
 					positionValid = true
 				}
 
@@ -690,34 +681,34 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 		oppositeSide = Buy
 	}
 	// 손절 주문 생성
-	slOrder := OrderRequest{
+	slOrder := domain.OrderRequest{
 		Symbol:       s.Symbol,
-		Side:         oppositeSide,
-		PositionSide: positionSide,
-		Type:         StopMarket,
+		Side:         domain.OrderSide(oppositeSide),
+		PositionSide: domain.PositionSide(positionSide),
+		Type:         domain.StopMarket,
 		Quantity:     actualQuantity,
 		StopPrice:    adjustStopLoss,
 	}
 	// 손절 주문 실행
 
-	slResponse, err := c.client.PlaceOrder(ctx, slOrder)
+	slResponse, err := c.exchange.PlaceOrder(ctx, slOrder)
 	if err != nil {
 		log.Printf("손절(SL) 주문 실패: %v", err)
 		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
 	}
 
 	// 익절 주문 생성
-	tpOrder := OrderRequest{
+	tpOrder := domain.OrderRequest{
 		Symbol:       s.Symbol,
-		Side:         oppositeSide,
-		PositionSide: positionSide,
-		Type:         TakeProfitMarket,
+		Side:         domain.OrderSide(oppositeSide),
+		PositionSide: domain.PositionSide(positionSide),
+		Type:         domain.TakeProfitMarket,
 		Quantity:     actualQuantity,
 		StopPrice:    adjustTakeProfit,
 	}
 	// 익절 주문 실행
 
-	tpResponse, err := c.client.PlaceOrder(ctx, tpOrder)
+	tpResponse, err := c.exchange.PlaceOrder(ctx, tpOrder)
 	if err != nil {
 		log.Printf("익절(TP) 주문 실패: %v", err)
 		return fmt.Errorf("익절(TP) 주문 실패: %w", err)
@@ -735,7 +726,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	tradeInfo := notification.TradeInfo{
 		Symbol:        s.Symbol,
-		PositionType:  targetPositionSide,
+		PositionType:  string(targetPositionSide),
 		PositionValue: positionResult.PositionValue,
 		Quantity:      actualQuantity,
 		EntryPrice:    actualEntryPrice,
@@ -768,34 +759,34 @@ func AdjustQuantity(quantity float64, stepSize float64, precision int) float64 {
 }
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다
-func (c *Collector) getIntervalString() string {
+func (c *Collector) getIntervalString() domain.TimeInterval {
 	switch c.config.App.FetchInterval {
 	case 1 * time.Minute:
-		return "1m"
+		return domain.Interval1m
 	case 3 * time.Minute:
-		return "3m"
+		return domain.Interval3m
 	case 5 * time.Minute:
-		return "5m"
+		return domain.Interval5m
 	case 15 * time.Minute:
-		return "15m"
+		return domain.Interval15m
 	case 30 * time.Minute:
-		return "30m"
+		return domain.Interval30m
 	case 1 * time.Hour:
-		return "1h"
+		return domain.Interval1h
 	case 2 * time.Hour:
-		return "2h"
+		return domain.Interval2h
 	case 4 * time.Hour:
-		return "4h"
+		return domain.Interval4h
 	case 6 * time.Hour:
-		return "6h"
+		return domain.Interval6h
 	case 8 * time.Hour:
-		return "8h"
+		return domain.Interval8h
 	case 12 * time.Hour:
-		return "12h"
+		return domain.Interval12h
 	case 24 * time.Hour:
-		return "1d"
+		return domain.Interval1d
 	default:
-		return "15m" // 기본값
+		return domain.Interval15m // 기본값
 	}
 }
 
