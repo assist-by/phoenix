@@ -61,7 +61,18 @@ func (e *EMA) Calculate(prices []PriceData) ([]Result, error) {
 
 	// EMA 계산: EMA = 이전 EMA + (현재가 - 이전 EMA) × 승수
 	for i := period; i < len(prices); i++ {
-		prevEMA := results[i-1].(EMAResult).Value
+		// 이전 결과가 nil인지 확인
+		if results[i-1] == nil {
+			continue // nil이면 이 단계 건너뜀
+		}
+
+		// 안전한 타입 변환
+		prevResult, ok := results[i-1].(EMAResult)
+		if !ok {
+			return nil, fmt.Errorf("EMA 결과 타입 변환 실패 (인덱스: %d)", i-1)
+		}
+
+		prevEMA := prevResult.Value
 		ema := (prices[i].Close-prevEMA)*multiplier + prevEMA
 		results[i] = EMAResult{
 			Value:     ema,

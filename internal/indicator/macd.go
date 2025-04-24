@@ -66,10 +66,26 @@ func (m *MACD) Calculate(prices []PriceData) ([]Result, error) {
 	// MACD 라인 계산 (단기 EMA - 장기 EMA)
 	macdStartIdx := m.LongPeriod - 1
 	macdLine := make([]PriceData, len(prices)-macdStartIdx)
+
+	// 이 부분에 타입 안전성 확보를 위한 체크 추가
 	for i := range macdLine {
+		idx := i + macdStartIdx
+		// nil 체크 추가
+		if shortEMAResults[idx] == nil || longEMAResults[idx] == nil {
+			continue // nil인 경우 건너뛰기
+		}
+
+		// 안전한 타입 변환
+		shortVal, ok1 := shortEMAResults[idx].(EMAResult)
+		longVal, ok2 := longEMAResults[idx].(EMAResult)
+
+		if !ok1 || !ok2 {
+			return nil, fmt.Errorf("EMA 결과 타입 변환 실패 (인덱스: %d)", idx)
+		}
+
 		macdLine[i] = PriceData{
-			Time:  prices[i+macdStartIdx].Time,
-			Close: shortEMAResults[i+macdStartIdx].(EMAResult).Value - longEMAResults[i+macdStartIdx].(EMAResult).Value,
+			Time:  prices[idx].Time,
+			Close: shortVal.Value - longVal.Value,
 		}
 	}
 
@@ -92,8 +108,23 @@ func (m *MACD) Calculate(prices []PriceData) ([]Result, error) {
 	// 실제 MACD 결과 설정
 	for i := 0; i < len(macdLine)-resultStartIdx; i++ {
 		resultIdx := i + macdStartIdx + resultStartIdx
+
+		// nil 체크 추가
+		if i+resultStartIdx >= len(macdLine) || i >= len(signalEMAResults) || signalEMAResults[i] == nil {
+			results[resultIdx] = nil
+			continue
+		}
+
 		macdValue := macdLine[i+resultStartIdx].Close
-		signalValue := signalEMAResults[i].(EMAResult).Value
+
+		// 안전한 타입 변환
+		signalEMAResult, ok := signalEMAResults[i].(EMAResult)
+		if !ok {
+			results[resultIdx] = nil
+			continue
+		}
+
+		signalValue := signalEMAResult.Value
 
 		results[resultIdx] = MACDResult{
 			MACD:      macdValue,
