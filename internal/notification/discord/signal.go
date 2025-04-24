@@ -3,29 +3,30 @@ package discord
 import (
 	"fmt"
 
-	"github.com/assist-by/phoenix/internal/analysis/signal"
+	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/notification"
+	"github.com/assist-by/phoenix/internal/strategy"
 )
 
 // SendSignal은 시그널 알림을 Discord로 전송합니다
-func (c *Client) SendSignal(s *signal.Signal) error {
+func (c *Client) SendSignal(s *strategy.Signal) error {
 	var title, emoji string
 	var color int
 
 	switch s.Type {
-	case signal.Long:
+	case domain.Long:
 		emoji = "🚀"
 		title = "LONG"
 		color = notification.ColorSuccess
-	case signal.Short:
+	case domain.Short:
 		emoji = "🔻"
 		title = "SHORT"
 		color = notification.ColorError
-	case signal.PendingLong:
+	case domain.PendingLong:
 		emoji = "⏳"
 		title = "PENDING LONG"
 		color = notification.ColorWarning
-	case signal.PendingShort:
+	case domain.PendingShort:
 		emoji = "⏳"
 		title = "PENDING SHORT"
 		color = notification.ColorWarning
@@ -39,38 +40,38 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 	longConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 위)
 %s MACD (시그널 상향돌파)
 %s SAR (SAR이 가격 아래)`,
-		getCheckMark(s.Conditions.EMALong),
-		getCheckMark(s.Conditions.MACDLong),
-		getCheckMark(s.Conditions.SARLong))
+		getCheckMark(s.Conditions["EMALong"].(bool)),
+		getCheckMark(s.Conditions["MACDLong"].(bool)),
+		getCheckMark(s.Conditions["SARLong"].(bool)))
 
 	shortConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 아래)
 		%s MACD (시그널 하향돌파)
 		%s SAR (SAR이 가격 위)`,
-		getCheckMark(s.Conditions.EMAShort),
-		getCheckMark(s.Conditions.MACDShort),
-		getCheckMark(s.Conditions.SARShort))
+		getCheckMark(s.Conditions["EMAShort"].(bool)),
+		getCheckMark(s.Conditions["MACDShort"].(bool)),
+		getCheckMark(s.Conditions["SARShort"].(bool)))
 
 	// 기술적 지표 값
 	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
-		s.Conditions.EMAValue,
-		s.Conditions.MACDValue,
-		s.Conditions.SignalValue,
-		s.Conditions.MACDValue-s.Conditions.SignalValue,
-		s.Conditions.SARValue)
+		s.Conditions["EMAValue"].(float64),
+		s.Conditions["MACDValue"].(float64),
+		s.Conditions["SignalValue"].(float64),
+		s.Conditions["MACDValue"].(float64)-s.Conditions["SignalValue"].(float64),
+		s.Conditions["SARValue"].(float64))
 
 	embed := NewEmbed().
 		SetTitle(fmt.Sprintf("%s %s %s/USDT", emoji, title, s.Symbol)).
 		SetColor(color)
 
-	if s.Type != signal.NoSignal {
+	if s.Type != domain.NoSignal {
 		// 손익률 계산 및 표시
 		var slPct, tpPct float64
 		switch s.Type {
-		case signal.Long:
+		case domain.Long:
 			// Long: 실제 수치 그대로 표시
 			slPct = (s.StopLoss - s.Price) / s.Price * 100
 			tpPct = (s.TakeProfit - s.Price) / s.Price * 100
-		case signal.Short:
+		case domain.Short:
 			// Short: 부호 반대로 표시
 			slPct = (s.Price - s.StopLoss) / s.Price * 100
 			tpPct = (s.Price - s.TakeProfit) / s.Price * 100
@@ -87,10 +88,10 @@ func (c *Client) SendSignal(s *signal.Signal) error {
 			s.TakeProfit,
 			tpPct,
 		))
-	} else if s.Type == signal.PendingLong || s.Type == signal.PendingShort {
+	} else if s.Type == domain.PendingLong || s.Type == domain.PendingShort {
 		// 대기 상태 정보 표시
 		var waitingFor string
-		if s.Type == signal.PendingLong {
+		if s.Type == domain.PendingLong {
 			waitingFor = "SAR가 캔들 아래로 이동 대기 중"
 		} else {
 			waitingFor = "SAR가 캔들 위로 이동 대기 중"

@@ -10,12 +10,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/assist-by/phoenix/internal/analysis/signal"
 	"github.com/assist-by/phoenix/internal/config"
+	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/exchange/binance"
 	"github.com/assist-by/phoenix/internal/market"
 	"github.com/assist-by/phoenix/internal/notification/discord"
 	"github.com/assist-by/phoenix/internal/scheduler"
+	"github.com/assist-by/phoenix/internal/strategy"
+	"github.com/assist-by/phoenix/internal/strategy/macdsarema"
 )
 
 // CollectorTask는 데이터 수집 작업을 정의합니다
@@ -103,23 +105,61 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 시그널 감지기 생성
-	detector := signal.NewDetector(signal.DetectorConfig{
-		EMALength:      200,
-		StopLossPct:    0.02,
-		TakeProfitPct:  0.04,
-		MinHistogram:   0.00005,
-		MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
-	})
+	// 전략 레지스트리 생성
+	strategyRegistry := strategy.NewRegistry()
+
+	// MACD+SAR+EMA 전략 등록
+	macdsarema.RegisterStrategy(strategyRegistry)
+
+	// 전략 설정
+	strategyConfig := map[string]interface{}{
+		"emaLength":      200,
+		"stopLossPct":    0.02,
+		"takeProfitPct":  0.04,
+		"minHistogram":   0.00005,
+		"maxWaitCandles": 3,
+	}
+
+	// 전략 인스턴스 생성
+	tradingStrategy, err := strategyRegistry.Create("MACD+SAR+EMA", strategyConfig)
+	if err != nil {
+		log.Fatalf("전략 생성 실패: %v", err)
+	}
+
+	// 전략 초기화
+	tradingStrategy.Initialize(context.Background())
+
+	// 데이터 수집기 생성 (detector 대신 tradingStrategy 사용)
+	collector := market.NewCollector(
+		binanceClient,
+		discordClient,
+		tradingStrategy,
+		cfg,
+		market.WithRetryConfig(market.RetryConfig{
+			MaxRetries: 3,
+			BaseDelay:  1 * time.Second,
+			MaxDelay:   30 * time.Second,
+			Factor:     2.0,
+		}),
+	)
+
+	// // 시그널 감지기 생성
+	// detector := signal.NewDetector(signal.DetectorConfig{
+	// 	EMALength:      200,
+	// 	StopLossPct:    0.02,
+	// 	TakeProfitPct:  0.04,
+	// 	MinHistogram:   0.00005,
+	// 	MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
+	// })
 
 	// 테스트 모드 실행 (플래그 기반)
 	if *testLongFlag || *testShortFlag {
 		testType := "Long"
-		signalType := signal.Long
+		signalType := domain.Long
 
 		if *testShortFlag {
 			testType = "Short"
-			signalType = signal.Short
+			signalType = domain.Short
 		}
 
 		// 테스트할 심볼
@@ -133,25 +173,49 @@ func main() {
 		currentPrice := candles[0].Close
 
 		// 테스트 시그널 생성
-		var testSignal *signal.Signal
+		var testSignal *strategy.Signal
 
-		if signalType == signal.Long {
-			testSignal = &signal.Signal{
-				Type:       signal.Long,
+		if signalType == domain.Long {
+			testSignal = &strategy.Signal{
+				Type:       domain.Long,
 				Symbol:     symbol,
 				Price:      currentPrice,
 				Timestamp:  time.Now(),
 				StopLoss:   currentPrice * 0.99, // 가격의 99% (1% 손절)
 				TakeProfit: currentPrice * 1.01, // 가격의 101% (1% 익절)
+				Conditions: map[string]interface{}{
+					"EMALong":     true,
+					"EMAShort":    false,
+					"MACDLong":    true,
+					"MACDShort":   false,
+					"SARLong":     true,
+					"SARShort":    false,
+					"EMAValue":    currentPrice * 0.95, // 예시 값
+					"MACDValue":   0.0015,              // 예시 값
+					"SignalValue": 0.0010,              // 예시 값
+					"SARValue":    currentPrice * 0.98, // 예시 값
+				},
 			}
 		} else {
-			testSignal = &signal.Signal{
-				Type:       signal.Short,
+			testSignal = &strategy.Signal{
+				Type:       domain.Short,
 				Symbol:     symbol,
 				Price:      currentPrice,
 				Timestamp:  time.Now(),
 				StopLoss:   currentPrice * 1.01, // 가격의 101% (1% 손절)
 				TakeProfit: currentPrice * 0.99, // 가격의 99% (1% 익절)
+				Conditions: map[string]interface{}{
+					"EMALong":     false,
+					"EMAShort":    true,
+					"MACDLong":    false,
+					"MACDShort":   true,
+					"SARLong":     false,
+					"SARShort":    true,
+					"EMAValue":    currentPrice * 1.05, // 예시 값
+					"MACDValue":   -0.0015,             // 예시 값
+					"SignalValue": -0.0010,             // 예시 값
+					"SARValue":    currentPrice * 1.02, // 예시 값
+				},
 			}
 		}
 
@@ -159,20 +223,6 @@ func main() {
 		if err := discordClient.SendSignal(testSignal); err != nil {
 			log.Printf("시그널 알림 전송 실패: %v", err)
 		}
-
-		// 데이터 수집기 생성
-		collector := market.NewCollector(
-			binanceClient,
-			discordClient,
-			detector,
-			cfg,
-			market.WithRetryConfig(market.RetryConfig{
-				MaxRetries: 3,
-				BaseDelay:  1 * time.Second,
-				MaxDelay:   30 * time.Second,
-				Factor:     2.0,
-			}),
-		)
 
 		// executeSignalTrade 직접 호출
 		if err := collector.ExecuteSignalTrade(ctx, testSignal); err != nil {
@@ -191,20 +241,6 @@ func main() {
 		log.Println("프로그램을 종료합니다.")
 		os.Exit(0)
 	}
-
-	// 데이터 수집기 생성
-	collector := market.NewCollector(
-		binanceClient,
-		discordClient,
-		detector,
-		cfg,
-		market.WithRetryConfig(market.RetryConfig{
-			MaxRetries: 3,
-			BaseDelay:  1 * time.Second,
-			MaxDelay:   30 * time.Second,
-			Factor:     2.0,
-		}),
-	)
 
 	// 수집 작업 생성
 	task := &CollectorTask{

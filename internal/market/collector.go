@@ -8,13 +8,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/assist-by/phoenix/internal/analysis/indicator"
-	"github.com/assist-by/phoenix/internal/analysis/signal"
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/exchange"
+	"github.com/assist-by/phoenix/internal/indicator"
 	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
+	"github.com/assist-by/phoenix/internal/strategy"
 )
 
 // RetryConfig는 재시도 설정을 정의합니다
@@ -29,7 +29,7 @@ type RetryConfig struct {
 type Collector struct {
 	exchange exchange.Exchange
 	discord  *discord.Client
-	detector *signal.Detector
+	strategy strategy.Strategy
 	config   *config.Config
 
 	retry RetryConfig
@@ -37,11 +37,11 @@ type Collector struct {
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(exchange exchange.Exchange, discord *discord.Client, detector *signal.Detector, config *config.Config, opts ...CollectorOption) *Collector {
+func NewCollector(exchange exchange.Exchange, discord *discord.Client, strategy strategy.Strategy, config *config.Config, opts ...CollectorOption) *Collector {
 	c := &Collector{
 		exchange: exchange,
 		discord:  discord,
-		detector: detector,
+		strategy: strategy,
 		config:   config,
 	}
 
@@ -139,7 +139,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 			}
 
 			// 시그널 감지
-			s, err := c.detector.Detect(symbol, prices)
+			s, err := c.strategy.Analyze(ctx, symbol, candles)
 			if err != nil {
 				log.Printf("시그널 감지 실패 (%s): %v", symbol, err)
 				return nil
@@ -153,7 +153,7 @@ func (c *Collector) Collect(ctx context.Context) error {
 					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
 				}
 
-				if s.Type != signal.NoSignal {
+				if s.Type != domain.NoSignal {
 
 					// 진입 가능 여부 확인
 					result, err := c.checkEntryAvailable(ctx, s)
@@ -268,7 +268,7 @@ func findDomainBracket(brackets []domain.LeverageBracket, leverage int) *domain.
 	}
 	return nil
 }
-func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.Signal) (bool, error) {
+func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *strategy.Signal) (bool, error) {
 	// 1. 현재 포지션 조회
 	positions, err := c.exchange.GetPositions(ctx)
 	if err != nil {
@@ -297,7 +297,7 @@ func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *signal.
 		(existingPosition.PositionSide == "BOTH" && existingPosition.Quantity > 0)
 
 	// 새 시그널 방향 확인
-	newSignalIsLong := coinSignal.Type == signal.Long
+	newSignalIsLong := coinSignal.Type == domain.Long
 
 	// 같은 방향의 시그널이면 진입 불가
 	if currentPositionIsLong == newSignalIsLong {
@@ -436,8 +436,8 @@ func (c *Collector) closePositionAtMarket(ctx context.Context, position *domain.
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
 // ExecuteSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
-func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) error {
-	if s.Type == signal.NoSignal {
+func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) error {
+	if s.Type == domain.NoSignal {
 		return nil // 시그널이 없으면 아무것도 하지 않음
 	}
 
@@ -550,7 +550,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	//---------------------------------
 	orderSide := Buy
 	positionSide := Long
-	if s.Type == signal.Short {
+	if s.Type == domain.Short {
 		orderSide = Sell
 		positionSide = Short
 	}
@@ -586,7 +586,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 
 	// 목표 포지션 사이드 문자열로 변환
 	targetPositionSide := domain.LongPosition
-	if s.Type == signal.Short {
+	if s.Type == domain.Short {
 		targetPositionSide = domain.ShortPosition
 	}
 
@@ -639,7 +639,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	actualQuantity := math.Abs(position.Quantity)
 
 	var stopLoss, takeProfit float64
-	if s.Type == signal.Long {
+	if s.Type == domain.Long {
 		slDistance := s.Price - s.StopLoss
 		tpDistance := s.TakeProfit - s.Price
 		stopLoss = actualEntryPrice - slDistance
@@ -661,7 +661,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	tpPctChange := ((adjustTakeProfit - actualEntryPrice) / actualEntryPrice) * 100
 
 	// Short 포지션인 경우 부호 반전 (Short에서는 손절은 가격 상승, 익절은 가격 하락)
-	if s.Type == signal.Short {
+	if s.Type == domain.Short {
 		slPctChange = -slPctChange
 		tpPctChange = -tpPctChange
 	}
@@ -677,7 +677,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *signal.Signal) er
 	// 14. TP/SL 주문 생성
 	//---------------------------------
 	oppositeSide := Sell
-	if s.Type == signal.Short {
+	if s.Type == domain.Short {
 		oppositeSide = Buy
 	}
 	// 손절 주문 생성
