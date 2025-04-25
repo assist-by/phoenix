@@ -36,6 +36,9 @@ type Notifier interface {
 
 	// SendInfo는 일반 정보 알림을 전송합니다
 	SendInfo(message string) error
+
+	// SendTradeInfo는 거래 실행 정보를 전송합니다
+	SendTradeInfo(info TradeInfo) error
 }
 
 // TradeInfo는 거래 실행 정보를 정의합니다

@@ -540,7 +540,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) 
 	//---------------------------------
 	// 8. 주문 수량 정밀도 조정
 	//---------------------------------
-	adjustedQuantity := AdjustQuantity(
+	adjustedQuantity := domain.AdjustQuantity(
 		positionResult.Quantity,
 		symbolInfo.StepSize,
 		symbolInfo.QuantityPrecision,
@@ -654,8 +654,8 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) 
 
 	// 가격 정밀도에 맞게 조정
 	// symbolInfo.TickSize와 symbolInfo.PricePrecision 사용
-	adjustStopLoss := AdjustPrice(stopLoss, symbolInfo.TickSize, symbolInfo.PricePrecision)
-	adjustTakeProfit := AdjustPrice(takeProfit, symbolInfo.TickSize, symbolInfo.PricePrecision)
+	adjustStopLoss := domain.AdjustPrice(stopLoss, symbolInfo.TickSize, symbolInfo.PricePrecision)
+	adjustTakeProfit := domain.AdjustPrice(takeProfit, symbolInfo.TickSize, symbolInfo.PricePrecision)
 
 	// 실제 계산된 비율로 메시지 생성
 	slPctChange := ((adjustStopLoss - actualEntryPrice) / actualEntryPrice) * 100
@@ -744,21 +744,6 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) 
 	return nil
 }
 
-// AdjustQuantity는 바이낸스 최소 단위(stepSize)에 맞게 수량을 조정합니다
-func AdjustQuantity(quantity float64, stepSize float64, precision int) float64 {
-	if stepSize == 0 {
-		return quantity // stepSize가 0이면 조정 불필요
-	}
-
-	// stepSize로 나누어 떨어지도록 조정
-	steps := math.Floor(quantity / stepSize)
-	adjustedQuantity := steps * stepSize
-
-	// 정밀도에 맞게 반올림
-	scale := math.Pow(10, float64(precision))
-	return math.Floor(adjustedQuantity*scale) / scale
-}
-
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다
 func (c *Collector) getIntervalString() domain.TimeInterval {
 	switch c.config.App.FetchInterval {
@@ -842,21 +827,6 @@ func (c *Collector) withRetry(ctx context.Context, operation string, fn func() e
 		}
 	}
 	return lastErr
-}
-
-// AdjustPrice는 가격 정밀도 설정 함수
-func AdjustPrice(price float64, tickSize float64, precision int) float64 {
-	if tickSize == 0 {
-		return price // tickSize가 0이면 조정 불필요
-	}
-
-	// tickSize로 나누어 떨어지도록 조정
-	ticks := math.Floor(price / tickSize)
-	adjustedPrice := ticks * tickSize
-
-	// 정밀도에 맞게 반올림
-	scale := math.Pow(10, float64(precision))
-	return math.Floor(adjustedPrice*scale) / scale
 }
 
 // IsRetryableError 함수는 재 시도 할 작업인지 검사하는 함수
