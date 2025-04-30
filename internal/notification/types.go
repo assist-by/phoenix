@@ -1,6 +1,10 @@
 package notification
 
-import "time"
+import (
+	"time"
+
+	"github.com/assist-by/phoenix/internal/strategy"
+)
 
 // SignalType은 트레이딩 시그널 종류를 정의합니다
 type SignalType string
@@ -29,7 +33,7 @@ type Signal struct {
 // Notifier는 알림 전송 인터페이스를 정의합니다
 type Notifier interface {
 	// SendSignal은 트레이딩 시그널 알림을 전송합니다
-	SendSignal(signal Signal) error
+	SendSignal(signal *strategy.Signal) error
 
 	// SendError는 에러 알림을 전송합니다
 	SendError(err error) error
