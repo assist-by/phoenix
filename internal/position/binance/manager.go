@@ -122,6 +122,10 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 	if err != nil {
 		return nil, position.NewPositionError(symbol, "calculate_position", err)
 	}
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("💰 포지션 계산: %.2f USDT, 수량: %.8f",
+			posResult.PositionValue, posResult.Quantity))
+	}
 
 	// 9. 수량 정밀도 조정
 	adjustedQuantity := domain.AdjustQuantity(posResult.Quantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision)
@@ -145,8 +149,10 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 		return nil, position.NewPositionError(symbol, "place_entry_order", err)
 	}
 
-	log.Printf("포지션 진입 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
-		symbol, adjustedQuantity, orderResponse.OrderID)
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("✅ 포지션 진입 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
+			symbol, adjustedQuantity, orderResponse.OrderID))
+	}
 
 	// 13. 포지션 확인
 	var actualPosition *domain.Position
@@ -214,6 +220,11 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 	if err != nil {
 		log.Printf("익절 주문 실패: %v", err)
 		// 진입은 성공했으므로 에러는 기록만 하고 계속 진행
+	}
+
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("🔄 TP/SL 설정 완료: %s\n손절(SL): %.2f\n익절(TP): %.2f",
+			symbol, stopLoss, takeProfit))
 	}
 
 	// 17. 결과 생성
@@ -284,8 +295,10 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 			}
 
 			// 반대 방향의 포지션이 있으면 청산 필요
-			log.Printf("반대 방향 포지션 감지: %s, 수량: %.8f, 방향: %s",
-				symbol, math.Abs(pos.Quantity), pos.PositionSide)
+			if m.notifier != nil {
+				m.notifier.SendInfo(fmt.Sprintf("반대 방향 포지션 감지: %s, 수량: %.8f, 방향: %s",
+					symbol, math.Abs(pos.Quantity), pos.PositionSide))
+			}
 
 			// 기존 주문 취소
 			if err := m.CancelAllOrders(ctx, symbol); err != nil {
@@ -323,7 +336,9 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 				}
 
 				if cleared {
-					log.Printf("%s 포지션 청산 확인 완료", symbol)
+					if m.notifier != nil {
+						m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션이 성공적으로 청산되었습니다.", symbol))
+					}
 					return true, nil
 				}
 
@@ -363,14 +378,17 @@ func (m *BinancePositionManager) CancelAllOrders(ctx context.Context, symbol str
 	}
 
 	if len(openOrders) > 0 {
-		log.Printf("%s의 기존 주문 %d개를 취소합니다.", symbol, len(openOrders))
-
 		for _, order := range openOrders {
 			if err := m.exchange.CancelOrder(ctx, symbol, order.OrderID); err != nil {
 				log.Printf("주문 취소 실패 (ID: %d): %v", order.OrderID, err)
 				return fmt.Errorf("주문 취소 실패 (ID: %d): %w", order.OrderID, err)
 			}
 			log.Printf("주문 취소 성공: %s %s (ID: %d)", order.Type, order.Side, order.OrderID)
+		}
+
+		if m.notifier != nil {
+			m.notifier.SendInfo(fmt.Sprintf("🗑️ %s의 기존 주문 %d개가 모두 취소되었습니다.",
+				symbol, len(openOrders)))
 		}
 	}
 
@@ -420,8 +438,10 @@ func (m *BinancePositionManager) ClosePosition(ctx context.Context, symbol strin
 		return nil, position.NewPositionError(symbol, "place_close_order", err)
 	}
 
-	log.Printf("포지션 청산 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
-		symbol, math.Abs(targetPosition.Quantity), orderResponse.OrderID)
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("🔴 포지션 청산 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
+			symbol, math.Abs(targetPosition.Quantity), orderResponse.OrderID))
+	}
 
 	// 6. 포지션 청산 확인
 	cleared := false
@@ -448,10 +468,6 @@ func (m *BinancePositionManager) ClosePosition(ctx context.Context, symbol strin
 		time.Sleep(m.retryDelay)
 	}
 
-	if !cleared {
-		return nil, position.NewPositionError(symbol, "confirm_close", fmt.Errorf("최대 재시도 횟수 초과: 포지션이 청산되지 않음"))
-	}
-
 	// 7. 결과 생성
 	realizedPnL := targetPosition.UnrealizedPnL
 
@@ -465,6 +481,23 @@ func (m *BinancePositionManager) ClosePosition(ctx context.Context, symbol strin
 			"close": orderResponse.OrderID,
 		},
 		RealizedPnL: &realizedPnL,
+	}
+
+	if cleared {
+		if m.notifier != nil {
+			// 수익/손실 정보 포함
+			pnlText := "손실"
+			if realizedPnL > 0 {
+				pnlText = "수익"
+			}
+			m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션 청산 완료: %.2f USDT %s",
+				symbol, math.Abs(realizedPnL), pnlText))
+		}
+	} else {
+		// 청산 확인 실패 시
+		if m.notifier != nil {
+			m.notifier.SendError(fmt.Errorf("❌ %s 포지션 청산 확인 실패", symbol))
+		}
 	}
 
 	return result, nil
