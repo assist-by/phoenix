@@ -12,9 +12,10 @@ import (
 
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
-	"github.com/assist-by/phoenix/internal/exchange/binance"
+	eBinance "github.com/assist-by/phoenix/internal/exchange/binance"
 	"github.com/assist-by/phoenix/internal/market"
 	"github.com/assist-by/phoenix/internal/notification/discord"
+	pBinance "github.com/assist-by/phoenix/internal/position/binance"
 	"github.com/assist-by/phoenix/internal/scheduler"
 	"github.com/assist-by/phoenix/internal/strategy"
 	"github.com/assist-by/phoenix/internal/strategy/macdsarema"
@@ -90,11 +91,11 @@ func main() {
 	}
 
 	// 바이낸스 클라이언트 생성
-	binanceClient := binance.NewClient(
+	binanceClient := eBinance.NewClient(
 		apiKey,
 		secretKey,
-		binance.WithTimeout(10*time.Second),
-		binance.WithTestnet(cfg.Binance.UseTestnet),
+		eBinance.WithTimeout(10*time.Second),
+		eBinance.WithTestnet(cfg.Binance.UseTestnet),
 	)
 	// 바이낸스 서버와 시간 동기화
 	if err := binanceClient.SyncTime(ctx); err != nil {
@@ -129,11 +130,19 @@ func main() {
 	// 전략 초기화
 	tradingStrategy.Initialize(context.Background())
 
+	// 포지션 매니저 생성
+	positionManager := pBinance.NewManager(
+		binanceClient,
+		discordClient,
+		tradingStrategy,
+	)
+
 	// 데이터 수집기 생성 (detector 대신 tradingStrategy 사용)
 	collector := market.NewCollector(
 		binanceClient,
 		discordClient,
 		tradingStrategy,
+		positionManager,
 		cfg,
 		market.WithRetryConfig(market.RetryConfig{
 			MaxRetries: 3,
