@@ -517,10 +517,10 @@ func (c *Client) GetLeverageBrackets(ctx context.Context, symbol string) ([]doma
 		Brackets []struct {
 			Bracket          int     `json:"bracket"`
 			InitialLeverage  int     `json:"initialLeverage"`
-			NotionalCap      float64 `json:"notionalCap,string"`
-			NotionalFloor    float64 `json:"notionalFloor,string"`
-			MaintMarginRatio float64 `json:"maintMarginRatio,string"`
-			Cum              float64 `json:"cum,string"`
+			NotionalCap      float64 `json:"notionalCap"`
+			NotionalFloor    float64 `json:"notionalFloor"`
+			MaintMarginRatio float64 `json:"maintMarginRatio"`
+			Cum              float64 `json:"cum"`
 		} `json:"brackets"`
 	}
 
