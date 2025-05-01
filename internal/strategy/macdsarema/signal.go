@@ -100,41 +100,61 @@ func CreateFromConditions(
 func (s *MACDSAREMASignal) ToNotificationData() map[string]interface{} {
 	data := s.BaseSignal.ToNotificationData() // 기본 필드 가져오기
 
-	// MACD+SAR+EMA 특화 필드 추가
-	data["EMA 값"] = fmt.Sprintf("%.5f", s.EMAValue)
-	data["EMA 상태"] = getAboveBelowText(s.EMAAbove)
-	data["MACD 값"] = fmt.Sprintf("%.5f", s.MACDValue)
-	data["시그널 값"] = fmt.Sprintf("%.5f", s.SignalValue)
-	data["히스토그램"] = fmt.Sprintf("%.5f", s.Histogram)
-	data["SAR 값"] = fmt.Sprintf("%.5f", s.SARValue)
-	data["SAR 상태"] = getSARText(s.SARBelow)
-	data["MACD 크로스"] = getMACDCrossText(s.MACDCross)
+	// 롱 조건 메시지
+	longConditionValue := fmt.Sprintf(
+		"%s EMA200 (가격이 EMA 위)\n%s MACD (시그널 상향돌파)\n%s SAR (SAR이 가격 아래)",
+		getCheckMark(s.EMAAbove),
+		getCheckMark(s.MACDCross > 0),
+		getCheckMark(s.SARBelow),
+	)
+
+	// 숏 조건 메시지
+	shortConditionValue := fmt.Sprintf(
+		"%s EMA200 (가격이 EMA 아래)\n%s MACD (시그널 하향돌파)\n%s SAR (SAR이 가격 위)",
+		getCheckMark(!s.EMAAbove),
+		getCheckMark(s.MACDCross < 0),
+		getCheckMark(!s.SARBelow),
+	)
+
+	// 기술적 지표 값 메시지 - 코드 블록으로 감싸기
+	technicalValue := fmt.Sprintf(
+		"```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f\n```",
+		s.EMAValue,
+		s.MACDValue,
+		s.SignalValue,
+		s.Histogram,
+		s.SARValue,
+	)
+
+	// Discord의 embed 필드로 구성 - inline 속성 true로 설정
+	fields := []map[string]interface{}{
+		{
+			"name":   "LONG 조건",
+			"value":  longConditionValue,
+			"inline": true, // 인라인으로 설정
+		},
+		{
+			"name":   "SHORT 조건",
+			"value":  shortConditionValue,
+			"inline": true, // 인라인으로 설정
+		},
+		{
+			"name":   "기술적 지표",
+			"value":  technicalValue,
+			"inline": false, // 이건 전체 폭 사용
+		},
+	}
+
+	// 필드 배열을 데이터에 추가
+	data["필드"] = fields
 
 	return data
 }
 
-// 표시용 헬퍼 함수들
-func getAboveBelowText(above bool) string {
-	if above {
-		return "가격이 EMA 위"
+// getCheckMark는 조건에 따라 체크마크나 X를 반환합니다
+func getCheckMark(condition bool) string {
+	if condition {
+		return "✅"
 	}
-	return "가격이 EMA 아래"
-}
-
-func getSARText(below bool) string {
-	if below {
-		return "SAR이 캔들 아래"
-	}
-	return "SAR이 캔들 위"
-}
-
-func getMACDCrossText(cross int) string {
-	switch cross {
-	case 1:
-		return "상향돌파"
-	case -1:
-		return "하향돌파"
-	default:
-		return "크로스 없음"
-	}
+	return "❌"
 }
