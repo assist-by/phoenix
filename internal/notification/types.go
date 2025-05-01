@@ -1,39 +1,19 @@
 package notification
 
-import (
-	"time"
-
-	"github.com/assist-by/phoenix/internal/strategy"
-)
-
-// SignalType은 트레이딩 시그널 종류를 정의합니다
-type SignalType string
+import "github.com/assist-by/phoenix/internal/domain"
 
 const (
-	SignalLong         SignalType = "LONG"
-	SignalShort        SignalType = "SHORT"
-	SignalClose        SignalType = "CLOSE"
-	SignalPendingLong  SignalType = "PENDINGLONG"  // 롱 대기 상태
-	SignalPendingShort SignalType = "PENDINGSHORT" // 숏 대기 상태
-	ColorSuccess                  = 0x00FF00
-	ColorError                    = 0xFF0000
-	ColorInfo                     = 0x0000FF
-	ColorWarning                  = 0xFFA500 // 대기 상태를 위한 주황색 추가
+	ColorSuccess = 0x00FF00 // 녹색
+	ColorError   = 0xFF0000 // 빨간색
+	ColorInfo    = 0x0000FF // 파란색
+	ColorWarning = 0xFFA500 // 주황색
 )
-
-// Signal은 트레이딩 시그널 정보를 담는 구조체입니다
-type Signal struct {
-	Type      SignalType
-	Symbol    string
-	Price     float64
-	Timestamp time.Time
-	Reason    string
-}
 
 // Notifier는 알림 전송 인터페이스를 정의합니다
 type Notifier interface {
 	// SendSignal은 트레이딩 시그널 알림을 전송합니다
-	SendSignal(signal *strategy.Signal) error
+	// 기존: SendSignal(signal *strategy.Signal) error
+	SendSignal(signal domain.SignalInterface) error
 
 	// SendError는 에러 알림을 전송합니다
 	SendError(err error) error
@@ -58,7 +38,7 @@ type TradeInfo struct {
 	Leverage      int     // 사용 레버리지
 }
 
-// getColorForPosition은 포지션 타입에 따른 색상을 반환합니다
+// GetColorForPosition은 포지션 타입에 따른 색상을 반환합니다
 func GetColorForPosition(positionType string) int {
 	switch positionType {
 	case "LONG":

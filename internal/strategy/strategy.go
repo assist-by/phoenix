@@ -26,7 +26,7 @@ type Strategy interface {
 	Initialize(ctx context.Context) error
 
 	// Analyze는 주어진 데이터를 분석하여 매매 신호를 생성합니다
-	Analyze(ctx context.Context, symbol string, candles domain.CandleList) (*Signal, error)
+	Analyze(ctx context.Context, symbol string, candles domain.CandleList) (domain.SignalInterface, error)
 
 	// GetName은 전략의 이름을 반환합니다
 	GetName() string

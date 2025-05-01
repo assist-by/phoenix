@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/indicator"
@@ -13,13 +14,13 @@ import (
 
 // 심볼별 상태를 관리하기 위한 구조체
 type SymbolState struct {
-	PrevMACD       float64           // 이전 MACD 값
-	PrevSignal     float64           // 이전 Signal 값
-	PrevHistogram  float64           // 이전 히스토그램 값
-	LastSignal     *strategy.Signal  // 마지막 발생 시그널
-	PendingSignal  domain.SignalType // 대기중인 시그널 타입
-	WaitedCandles  int               // 대기한 캔들 수
-	MaxWaitCandles int               // 최대 대기 캔들 수
+	PrevMACD       float64                // 이전 MACD 값
+	PrevSignal     float64                // 이전 Signal 값
+	PrevHistogram  float64                // 이전 히스토그램 값
+	LastSignal     domain.SignalInterface // 마지막 발생 시그널
+	PendingSignal  domain.SignalType      // 대기중인 시그널 타입
+	WaitedCandles  int                    // 대기한 캔들 수
+	MaxWaitCandles int                    // 최대 대기 캔들 수
 }
 
 // MACDSAREMAStrategy는 MACD + SAR + EMA 전략을 구현합니다
@@ -98,7 +99,7 @@ func (s *MACDSAREMAStrategy) Initialize(ctx context.Context) error {
 }
 
 // Analyze는 주어진 캔들 데이터를 분석하여 매매 신호를 생성합니다
-func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles domain.CandleList) (*strategy.Signal, error) {
+func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles domain.CandleList) (domain.SignalInterface, error) {
 	// 데이터 검증
 	emaLength := s.emaIndicator.Period
 	if len(candles) < emaLength {
@@ -168,27 +169,26 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 	)
 
 	// 시그널 객체 초기화
-	signal := &strategy.Signal{
-		Type:      domain.NoSignal,
-		Symbol:    symbol,
-		Price:     currentPrice,
-		Timestamp: lastCandle.Time,
-		Conditions: map[string]interface{}{
-			"EMALong":     isAboveEMA,
-			"EMAShort":    !isAboveEMA,
-			"MACDLong":    macdCross == 1,
-			"MACDShort":   macdCross == -1,
-			"SARLong":     sarBelowCandle,
-			"SARShort":    !sarBelowCandle,
-			"EMAValue":    currentEMA,
-			"MACDValue":   currentMACD,
-			"SignalValue": currentSignal,
-			"SARValue":    currentSAR,
-		},
+	signalType := domain.NoSignal
+	var stopLoss, takeProfit float64
+
+	// 조건 맵 생성 (기존과 동일)
+	conditions := map[string]interface{}{
+		"EMALong":     isAboveEMA,
+		"EMAShort":    !isAboveEMA,
+		"MACDLong":    macdCross == 1,
+		"MACDShort":   macdCross == -1,
+		"SARLong":     sarBelowCandle,
+		"SARShort":    !sarBelowCandle,
+		"EMAValue":    currentEMA,
+		"MACDValue":   currentMACD,
+		"SignalValue": currentSignal,
+		"SARValue":    currentSAR,
 	}
+
 	// 1. 대기 상태 확인 및 업데이트
 	if state.PendingSignal != domain.NoSignal {
-		pendingSignal := s.processPendingState(state, symbol, signal, currentHistogram, sarBelowCandle, sarAboveCandle)
+		pendingSignal := s.processPendingState(state, symbol, conditions, currentPrice, currentHistogram, sarBelowCandle, sarAboveCandle, currentSAR)
 		if pendingSignal != nil {
 			// 상태 업데이트
 			state.PrevMACD = currentMACD
@@ -206,9 +206,9 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		currentHistogram >= s.minHistogram && // MACD 히스토그램이 최소값 이상
 		sarBelowCandle { // SAR이 현재 봉의 저가보다 낮음
 
-		signal.Type = domain.Long
-		signal.StopLoss = currentSAR                                        // SAR 기반 손절가
-		signal.TakeProfit = currentPrice + (currentPrice - signal.StopLoss) // 1:1 비율
+		signalType = domain.Long
+		stopLoss = currentSAR                                 // SAR 기반 손절가
+		takeProfit = currentPrice + (currentPrice - stopLoss) // 1:1 비율
 
 		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
 			symbol, currentPrice, currentEMA, currentSAR)
@@ -220,16 +220,16 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		-currentHistogram >= s.minHistogram && // 음수 히스토그램에 대한 조건
 		sarAboveCandle { // SAR이 현재 봉의 고가보다 높음
 
-		signal.Type = domain.Short
-		signal.StopLoss = currentSAR                                        // SAR 기반 손절가
-		signal.TakeProfit = currentPrice - (signal.StopLoss - currentPrice) // 1:1 비율
+		signalType = domain.Short
+		stopLoss = currentSAR                                 // SAR 기반 손절가
+		takeProfit = currentPrice - (stopLoss - currentPrice) // 1:1 비율
 
 		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
 			symbol, currentPrice, currentEMA, currentSAR)
 	}
 
 	// 3. 새로운 대기 상태 설정 (일반 시그널이 아닌 경우)
-	if signal.Type == domain.NoSignal {
+	if signalType == domain.NoSignal {
 		// MACD 상향돌파 + EMA 위 + SAR 캔들 아래가 아닌 경우 -> 롱 대기 상태
 		if isAboveEMA && macdCross == 1 && !sarBelowCandle && currentHistogram > 0 {
 			state.PendingSignal = domain.PendingLong
@@ -250,11 +250,36 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 	state.PrevSignal = currentSignal
 	state.PrevHistogram = currentHistogram
 
-	if signal.Type != domain.NoSignal {
-		state.LastSignal = signal
+	macdSignal := &MACDSAREMASignal{
+		BaseSignal: domain.NewBaseSignal(
+			signalType,
+			symbol,
+			currentPrice,
+			lastCandle.Time,
+			stopLoss,
+			takeProfit,
+		),
+		EMAValue:    currentEMA,
+		EMAAbove:    isAboveEMA,
+		MACDValue:   currentMACD,
+		SignalValue: currentSignal,
+		Histogram:   currentHistogram,
+		MACDCross:   macdCross,
+		SARValue:    currentSAR,
+		SARBelow:    sarBelowCandle,
 	}
 
-	return signal, nil
+	// 조건 정보 설정
+	for k, v := range conditions {
+		macdSignal.SetCondition(k, v)
+	}
+
+	// 시그널이 생성되었으면 상태에 저장
+	if signalType != domain.NoSignal {
+		state.LastSignal = macdSignal
+	}
+
+	return macdSignal, nil
 }
 
 // getSymbolState는 심볼별 상태를 가져옵니다
@@ -296,7 +321,16 @@ func (s *MACDSAREMAStrategy) checkMACDCross(currentMACD, currentSignal, prevMACD
 }
 
 // processPendingState는 대기 상태를 처리하고 시그널을 생성합니다
-func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol string, baseSignal *strategy.Signal, currentHistogram float64, sarBelowCandle bool, sarAboveCandle bool) *strategy.Signal {
+func (s *MACDSAREMAStrategy) processPendingState(
+	state *SymbolState,
+	symbol string,
+	conditions map[string]interface{},
+	currentPrice float64,
+	currentHistogram float64,
+	sarBelowCandle bool,
+	sarAboveCandle bool,
+	currentSAR float64,
+) domain.SignalInterface {
 	// 캔들 카운트 증가
 	state.WaitedCandles++
 
@@ -307,13 +341,9 @@ func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol stri
 		return nil
 	}
 
-	resultSignal := &strategy.Signal{
-		Type:       domain.NoSignal,
-		Symbol:     baseSignal.Symbol,
-		Price:      baseSignal.Price,
-		Timestamp:  baseSignal.Timestamp,
-		Conditions: baseSignal.Conditions,
-	}
+	var resultSignal domain.SignalInterface = nil
+	var stopLoss, takeProfit float64
+	var resultType domain.SignalType = domain.NoSignal
 
 	// Long 대기 상태 처리
 	if state.PendingSignal == domain.PendingLong {
@@ -327,15 +357,15 @@ func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol stri
 
 		// SAR가 캔들 아래로 이동하면 롱 시그널 생성
 		if sarBelowCandle {
-			resultSignal.Type = domain.Long
-			resultSignal.StopLoss = baseSignal.Conditions["SARValue"].(float64)
-			resultSignal.TakeProfit = baseSignal.Price + (baseSignal.Price - resultSignal.StopLoss)
+			resultType = domain.Long
+			stopLoss = currentSAR
+			takeProfit = currentPrice + (currentPrice - stopLoss)
 
 			log.Printf("[%s] Long 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
 				symbol, state.WaitedCandles)
 
 			s.resetPendingState(state)
-			return resultSignal
+			// return resultSignal
 		}
 	}
 
@@ -351,19 +381,58 @@ func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol stri
 
 		// SAR이 캔들 위로 이동하면 숏 시그널 생성
 		if sarAboveCandle {
-			resultSignal.Type = domain.Short
-			resultSignal.StopLoss = baseSignal.Conditions["SARValue"].(float64)
-			resultSignal.TakeProfit = baseSignal.Price - (resultSignal.StopLoss - baseSignal.Price)
+			resultType = domain.Short
+			stopLoss = currentSAR
+			takeProfit = currentPrice - (stopLoss - currentPrice)
 
 			log.Printf("[%s] Short 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
 				symbol, state.WaitedCandles)
 
 			s.resetPendingState(state)
-			return resultSignal
+			// return resultSignal
 		}
 	}
 
-	return nil
+	// 최종 시그널 생성
+	if resultType != domain.NoSignal {
+		macdSignal := &MACDSAREMASignal{
+			BaseSignal: domain.NewBaseSignal(
+				resultType,
+				symbol,
+				currentPrice,
+				time.Now(), // or use a proper timestamp
+				stopLoss,
+				takeProfit,
+			),
+			// 특화 필드 설정
+			EMAValue:    conditions["EMAValue"].(float64),
+			EMAAbove:    conditions["EMALong"].(bool),
+			MACDValue:   conditions["MACDValue"].(float64),
+			SignalValue: conditions["SignalValue"].(float64),
+			SARValue:    conditions["SARValue"].(float64),
+			SARBelow:    conditions["SARLong"].(bool),
+			MACDCross:   getMACDCrossValue(conditions),
+			Histogram:   conditions["MACDValue"].(float64) - conditions["SignalValue"].(float64),
+		}
+
+		// 조건 정보 설정
+		for k, v := range conditions {
+			macdSignal.SetCondition(k, v)
+		}
+
+		resultSignal = macdSignal
+	}
+
+	return resultSignal
+}
+
+func getMACDCrossValue(conditions map[string]interface{}) int {
+	if conditions["MACDLong"].(bool) {
+		return 1 // 상향돌파
+	} else if conditions["MACDShort"].(bool) {
+		return -1 // 하향돌파
+	}
+	return 0 // 크로스 없음
 }
 
 // CalculateTPSL은 현재 SAR 값을 기반으로 TP/SL 가격을 계산합니다

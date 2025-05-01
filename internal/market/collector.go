@@ -140,31 +140,31 @@ func (c *Collector) Collect(ctx context.Context) error {
 			log.Printf("%s 심볼의 캔들 데이터 %d개 수집 완료", symbol, len(candles))
 
 			// 시그널 감지
-			s, err := c.strategy.Analyze(ctx, symbol, candles)
+			signal, err := c.strategy.Analyze(ctx, symbol, candles)
 			if err != nil {
 				log.Printf("시그널 감지 실패 (%s): %v", symbol, err)
 				return nil
 			}
 
 			// 시그널 정보 로깅
-			log.Printf("%s 시그널 감지 결과: %+v", symbol, s)
+			log.Printf("%s 시그널 감지 결과: %+v", symbol, signal)
 
-			if s != nil {
+			if signal != nil {
 				// Discord로 시그널 알림 전송
-				if err := c.discord.SendSignal(s); err != nil {
+				if err := c.discord.SendSignal(signal); err != nil {
 					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
 				}
 
-				if s.Type != domain.NoSignal {
+				if signal.GetType() != domain.NoSignal {
 					// 매매 실행
-					if err := c.ExecuteSignalTrade(ctx, s); err != nil {
+					if err := c.ExecuteSignalTrade(ctx, signal); err != nil {
 						errMsg := fmt.Errorf("매매 실행 실패 (%s): %w", symbol, err)
 						if discordErr := c.discord.SendError(errMsg); discordErr != nil {
 							log.Printf("에러 알림 전송 실패: %v", discordErr)
 						}
 						return errMsg
 					} else {
-						log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료", s.Symbol, s.Type.String())
+						log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료", signal.GetSymbol(), signal.GetType().String())
 					}
 				}
 			}
@@ -248,8 +248,8 @@ func (c *Collector) CalculatePosition(
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
 // ExecuteSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
-func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) error {
-	if s.Type == domain.NoSignal {
+func (c *Collector) ExecuteSignalTrade(ctx context.Context, s domain.SignalInterface) error {
+	if s.GetType() == domain.NoSignal {
 		return nil // 시그널이 없으면 아무것도 하지 않음
 	}
 
@@ -264,7 +264,7 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) 
 	_, err := c.positionManager.OpenPosition(ctx, req)
 	if err != nil {
 		// 에러 발생 시 Discord 알림 전송
-		errorMsg := fmt.Sprintf("포지션 진입 실패 (%s): %v", s.Symbol, err)
+		errorMsg := fmt.Sprintf("포지션 진입 실패 (%s): %v", s.GetSymbol(), err)
 		if discordErr := c.discord.SendError(fmt.Errorf(errorMsg)); discordErr != nil {
 			log.Printf("에러 알림 전송 실패: %v", discordErr)
 		}
@@ -273,7 +273,6 @@ func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) 
 	}
 
 	return nil
-
 }
 
 // getIntervalString은 수집 간격을 바이낸스 API 형식의 문자열로 변환합니다

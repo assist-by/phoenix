@@ -7,16 +7,18 @@ import (
 
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/notification"
-	"github.com/assist-by/phoenix/internal/strategy"
 )
 
-// SendSignal은 시그널 알림을 전송합니다
 // SendSignal은 시그널 알림을 Discord로 전송합니다
-func (c *Client) SendSignal(s *strategy.Signal) error {
+func (c *Client) SendSignal(s domain.SignalInterface) error {
+	if s == nil {
+		return fmt.Errorf("nil signal received")
+	}
+
 	var title, emoji string
 	var color int
 
-	switch s.Type {
+	switch s.GetType() {
 	case domain.Long:
 		emoji = "🚀"
 		title = "LONG"
@@ -39,86 +41,89 @@ func (c *Client) SendSignal(s *strategy.Signal) error {
 		color = notification.ColorInfo
 	}
 
-	// 시그널 조건 상태 표시
-	longConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 위)
-%s MACD (시그널 상향돌파)
-%s SAR (SAR이 가격 아래)`,
-		getCheckMark(s.Conditions["EMALong"].(bool)),
-		getCheckMark(s.Conditions["MACDLong"].(bool)),
-		getCheckMark(s.Conditions["SARLong"].(bool)))
-
-	shortConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 아래)
-		%s MACD (시그널 하향돌파)
-		%s SAR (SAR이 가격 위)`,
-		getCheckMark(s.Conditions["EMAShort"].(bool)),
-		getCheckMark(s.Conditions["MACDShort"].(bool)),
-		getCheckMark(s.Conditions["SARShort"].(bool)))
-
-	// 기술적 지표 값
-	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
-		s.Conditions["EMAValue"].(float64),
-		s.Conditions["MACDValue"].(float64),
-		s.Conditions["SignalValue"].(float64),
-		s.Conditions["MACDValue"].(float64)-s.Conditions["SignalValue"].(float64),
-		s.Conditions["SARValue"].(float64))
+	// 알림 데이터 가져오기
+	notificationData := s.ToNotificationData()
 
 	embed := NewEmbed().
-		SetTitle(fmt.Sprintf("%s %s %s/USDT", emoji, title, s.Symbol)).
+		SetTitle(fmt.Sprintf("%s %s %s/USDT", emoji, title, s.GetSymbol())).
 		SetColor(color)
 
-	if s.Type != domain.NoSignal {
+	// 기본 정보 설정 - 모든 시그널 타입에 공통
+	if s.GetType() != domain.NoSignal {
 		// 손익률 계산 및 표시
 		var slPct, tpPct float64
-		switch s.Type {
+		switch s.GetType() {
 		case domain.Long:
 			// Long: 실제 수치 그대로 표시
-			slPct = (s.StopLoss - s.Price) / s.Price * 100
-			tpPct = (s.TakeProfit - s.Price) / s.Price * 100
+			slPct = (s.GetStopLoss() - s.GetPrice()) / s.GetPrice() * 100
+			tpPct = (s.GetTakeProfit() - s.GetPrice()) / s.GetPrice() * 100
 		case domain.Short:
 			// Short: 부호 반대로 표시
-			slPct = (s.Price - s.StopLoss) / s.Price * 100
-			tpPct = (s.Price - s.TakeProfit) / s.Price * 100
+			slPct = (s.GetPrice() - s.GetStopLoss()) / s.GetPrice() * 100
+			tpPct = (s.GetPrice() - s.GetTakeProfit()) / s.GetPrice() * 100
 		}
 
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
  **현재가**: $%.2f
  **손절가**: $%.2f (%.2f%%)
  **목표가**: $%.2f (%.2f%%)`,
-			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-			s.Price,
-			s.StopLoss,
+			s.GetTimestamp().Format("2006-01-02 15:04:05 KST"),
+			s.GetPrice(),
+			s.GetStopLoss(),
 			slPct,
-			s.TakeProfit,
+			s.GetTakeProfit(),
 			tpPct,
 		))
-	} else if s.Type == domain.PendingLong || s.Type == domain.PendingShort {
+	} else if s.GetType() == domain.PendingLong || s.GetType() == domain.PendingShort {
 		// 대기 상태 정보 표시
 		var waitingFor string
-		if s.Type == domain.PendingLong {
-			waitingFor = "SAR가 캔들 아래로 이동 대기 중"
+		if s.GetType() == domain.PendingLong {
+			waitingFor = "진입 대기 중"
 		} else {
-			waitingFor = "SAR가 캔들 위로 이동 대기 중"
+			waitingFor = "진입 대기 중"
+		}
+
+		// notificationData에서 대기 상태 설명이 있으면 사용
+		if waitDesc, hasWaitDesc := notificationData["대기상태"]; hasWaitDesc {
+			waitingFor = waitDesc.(string)
 		}
 
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
 **현재가**: $%.2f
-**대기 상태**: %s
-**조건**: MACD 크로스 발생, SAR 위치 부적절`,
-			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-			s.Price,
+**대기 상태**: %s`,
+			s.GetTimestamp().Format("2006-01-02 15:04:05 KST"),
+			s.GetPrice(),
 			waitingFor,
 		))
 	} else {
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
  **현재가**: $%.2f`,
-			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-			s.Price,
+			s.GetTimestamp().Format("2006-01-02 15:04:05 KST"),
+			s.GetPrice(),
 		))
 	}
 
-	embed.AddField("LONG 조건", longConditions, true)
-	embed.AddField("SHORT 조건", shortConditions, true)
-	embed.AddField("기술적 지표", technicalValues, false)
+	// 전략별 필드들 추가
+	// 전략은 ToNotificationData에서 "필드" 키로 필드 목록을 제공할 수 있음
+	if fields, hasFields := notificationData["필드"].([]map[string]interface{}); hasFields {
+		for _, field := range fields {
+			name, _ := field["name"].(string)
+			value, _ := field["value"].(string)
+			inline, _ := field["inline"].(bool)
+			embed.AddField(name, value, inline)
+		}
+	} else {
+		// 기본 필드 추가 (전략이 "필드"를 제공하지 않는 경우)
+		// 기술적 지표 요약 표시
+		if technicalSummary, hasSummary := notificationData["기술지표요약"].(string); hasSummary {
+			embed.AddField("기술적 지표", technicalSummary, false)
+		}
+
+		// 기타 조건들 표시
+		if conditions, hasConditions := notificationData["조건"].(string); hasConditions {
+			embed.AddField("조건", conditions, false)
+		}
+	}
 
 	return c.sendToWebhook(c.signalWebhook, WebhookMessage{
 		Embeds: []Embed{*embed},

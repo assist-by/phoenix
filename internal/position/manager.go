@@ -4,14 +4,13 @@ import (
 	"context"
 
 	"github.com/assist-by/phoenix/internal/domain"
-	"github.com/assist-by/phoenix/internal/strategy"
 )
 
 // PositionRequest는 포지션 생성/관리 요청 정보를 담습니다
 type PositionRequest struct {
-	Signal     *strategy.Signal // 전략에서 생성된 시그널
-	Leverage   int              // 사용할 레버리지
-	RiskFactor float64          // 리스크 팩터 (계정 잔고의 몇 %를 리스크로 설정할지)
+	Signal     domain.SignalInterface // 시그널
+	Leverage   int                    // 사용할 레버리지
+	RiskFactor float64                // 리스크 팩터 (계정 잔고의 몇 %를 리스크로 설정할지)
 }
 
 // PositionResult는 포지션 생성/관리 결과 정보를 담습니다

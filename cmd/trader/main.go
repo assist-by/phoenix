@@ -182,50 +182,44 @@ func main() {
 		currentPrice := candles[0].Close
 
 		// 테스트 시그널 생성
-		var testSignal *strategy.Signal
+		var testSignal domain.SignalInterface
 
 		if signalType == domain.Long {
-			testSignal = &strategy.Signal{
-				Type:       domain.Long,
-				Symbol:     symbol,
-				Price:      currentPrice,
-				Timestamp:  time.Now(),
-				StopLoss:   currentPrice * 0.99, // 가격의 99% (1% 손절)
-				TakeProfit: currentPrice * 1.01, // 가격의 101% (1% 익절)
-				Conditions: map[string]interface{}{
-					"EMALong":     true,
-					"EMAShort":    false,
-					"MACDLong":    true,
-					"MACDShort":   false,
-					"SARLong":     true,
-					"SARShort":    false,
-					"EMAValue":    currentPrice * 0.95, // 예시 값
-					"MACDValue":   0.0015,              // 예시 값
-					"SignalValue": 0.0010,              // 예시 값
-					"SARValue":    currentPrice * 0.98, // 예시 값
-				},
-			}
+			testSignal = macdsarema.NewMACDSAREMASignal(
+				domain.Long,
+				symbol,
+				currentPrice,
+				time.Now(),
+				currentPrice*0.99, // 가격의 99% (1% 손절)
+				currentPrice*1.01, // 가격의 101% (1% 익절)
+			)
+			// 추가 필드 설정
+			macdSignal := testSignal.(*macdsarema.MACDSAREMASignal)
+			macdSignal.EMAValue = currentPrice * 0.95
+			macdSignal.MACDValue = 0.0015
+			macdSignal.SignalValue = 0.0010
+			macdSignal.SARValue = currentPrice * 0.98
+			macdSignal.EMAAbove = true
+			macdSignal.SARBelow = true
+			macdSignal.MACDCross = 1
 		} else {
-			testSignal = &strategy.Signal{
-				Type:       domain.Short,
-				Symbol:     symbol,
-				Price:      currentPrice,
-				Timestamp:  time.Now(),
-				StopLoss:   currentPrice * 1.01, // 가격의 101% (1% 손절)
-				TakeProfit: currentPrice * 0.99, // 가격의 99% (1% 익절)
-				Conditions: map[string]interface{}{
-					"EMALong":     false,
-					"EMAShort":    true,
-					"MACDLong":    false,
-					"MACDShort":   true,
-					"SARLong":     false,
-					"SARShort":    true,
-					"EMAValue":    currentPrice * 1.05, // 예시 값
-					"MACDValue":   -0.0015,             // 예시 값
-					"SignalValue": -0.0010,             // 예시 값
-					"SARValue":    currentPrice * 1.02, // 예시 값
-				},
-			}
+			testSignal = macdsarema.NewMACDSAREMASignal(
+				domain.Short,
+				symbol,
+				currentPrice,
+				time.Now(),
+				currentPrice*1.01, // 가격의 101% (1% 손절)
+				currentPrice*0.99, // 가격의 99% (1% 익절)
+			)
+			// 추가 필드 설정
+			macdSignal := testSignal.(*macdsarema.MACDSAREMASignal)
+			macdSignal.EMAValue = currentPrice * 1.05
+			macdSignal.MACDValue = -0.0015
+			macdSignal.SignalValue = -0.0010
+			macdSignal.SARValue = currentPrice * 1.02
+			macdSignal.EMAAbove = false
+			macdSignal.SARBelow = false
+			macdSignal.MACDCross = -1
 		}
 
 		// 시그널 알림 전송
@@ -233,7 +227,6 @@ func main() {
 			log.Printf("시그널 알림 전송 실패: %v", err)
 		}
 
-		// executeSignalTrade 직접 호출
 		if err := collector.ExecuteSignalTrade(ctx, testSignal); err != nil {
 			log.Printf("테스트 매매 실행 중 에러 발생: %v", err)
 			if err := discordClient.SendError(err); err != nil {

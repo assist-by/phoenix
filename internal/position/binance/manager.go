@@ -36,8 +36,8 @@ func NewManager(exchange exchange.Exchange, notifier notification.Notifier, stra
 
 // OpenPosition은 시그널에 따라 새 포지션을 생성합니다
 func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position.PositionRequest) (*position.PositionResult, error) {
-	symbol := req.Signal.Symbol
-	signalType := req.Signal.Type
+	symbol := req.Signal.GetSymbol()
+	signalType := req.Signal.GetType()
 
 	// 1. 진입 가능 여부 확인
 	available, err := m.IsEntryAvailable(ctx, symbol, signalType)
@@ -131,7 +131,7 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 	adjustedQuantity := domain.AdjustQuantity(posResult.Quantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision)
 
 	// 10. 포지션 방향 결정
-	positionSide := position.GetPositionSideFromSignal(req.Signal.Type)
+	positionSide := position.GetPositionSideFromSignal(req.Signal.GetType())
 	orderSide := position.GetOrderSideForEntry(positionSide)
 
 	// 11. 진입 주문 생성
@@ -183,8 +183,8 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 
 	// 14. TP/SL 설정
 	// 시그널에서 직접 TP/SL 값 사용
-	stopLoss := domain.AdjustPrice(req.Signal.StopLoss, symbolInfo.TickSize, symbolInfo.PricePrecision)
-	takeProfit := domain.AdjustPrice(req.Signal.TakeProfit, symbolInfo.TickSize, symbolInfo.PricePrecision)
+	stopLoss := domain.AdjustPrice(req.Signal.GetStopLoss(), symbolInfo.TickSize, symbolInfo.PricePrecision)
+	takeProfit := domain.AdjustPrice(req.Signal.GetTakeProfit(), symbolInfo.TickSize, symbolInfo.PricePrecision)
 
 	// 15. TP/SL 주문 생성
 	exitSide := position.GetOrderSideForExit(positionSide)

@@ -33,7 +33,6 @@ phoenix/
         ├── discord/
         │   ├── client.go
         │   ├── embed.go
-        │   ├── signal.go
         │   └── webhook.go
         └── types.go
     ├── position/
@@ -48,6 +47,7 @@ phoenix/
     └── strategy/
         ├── macdsarema/
             ├── init.go
+            ├── signal.go
             └── strategy.go
         └── strategy.go
 ```
@@ -68,9 +68,10 @@ import (
 
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
-	"github.com/assist-by/phoenix/internal/exchange/binance"
+	eBinance "github.com/assist-by/phoenix/internal/exchange/binance"
 	"github.com/assist-by/phoenix/internal/market"
 	"github.com/assist-by/phoenix/internal/notification/discord"
+	pBinance "github.com/assist-by/phoenix/internal/position/binance"
 	"github.com/assist-by/phoenix/internal/scheduler"
 	"github.com/assist-by/phoenix/internal/strategy"
 	"github.com/assist-by/phoenix/internal/strategy/macdsarema"
@@ -146,11 +147,11 @@ func main() {
 	}
 
 	// 바이낸스 클라이언트 생성
-	binanceClient := binance.NewClient(
+	binanceClient := eBinance.NewClient(
 		apiKey,
 		secretKey,
-		binance.WithTimeout(10*time.Second),
-		binance.WithTestnet(cfg.Binance.UseTestnet),
+		eBinance.WithTimeout(10*time.Second),
+		eBinance.WithTestnet(cfg.Binance.UseTestnet),
 	)
 	// 바이낸스 서버와 시간 동기화
 	if err := binanceClient.SyncTime(ctx); err != nil {
@@ -185,11 +186,19 @@ func main() {
 	// 전략 초기화
 	tradingStrategy.Initialize(context.Background())
 
+	// 포지션 매니저 생성
+	positionManager := pBinance.NewManager(
+		binanceClient,
+		discordClient,
+		tradingStrategy,
+	)
+
 	// 데이터 수집기 생성 (detector 대신 tradingStrategy 사용)
 	collector := market.NewCollector(
 		binanceClient,
 		discordClient,
 		tradingStrategy,
+		positionManager,
 		cfg,
 		market.WithRetryConfig(market.RetryConfig{
 			MaxRetries: 3,
@@ -229,50 +238,44 @@ func main() {
 		currentPrice := candles[0].Close
 
 		// 테스트 시그널 생성
-		var testSignal *strategy.Signal
+		var testSignal domain.SignalInterface
 
 		if signalType == domain.Long {
-			testSignal = &strategy.Signal{
-				Type:       domain.Long,
-				Symbol:     symbol,
-				Price:      currentPrice,
-				Timestamp:  time.Now(),
-				StopLoss:   currentPrice * 0.99, // 가격의 99% (1% 손절)
-				TakeProfit: currentPrice * 1.01, // 가격의 101% (1% 익절)
-				Conditions: map[string]interface{}{
-					"EMALong":     true,
-					"EMAShort":    false,
-					"MACDLong":    true,
-					"MACDShort":   false,
-					"SARLong":     true,
-					"SARShort":    false,
-					"EMAValue":    currentPrice * 0.95, // 예시 값
-					"MACDValue":   0.0015,              // 예시 값
-					"SignalValue": 0.0010,              // 예시 값
-					"SARValue":    currentPrice * 0.98, // 예시 값
-				},
-			}
+			testSignal = macdsarema.NewMACDSAREMASignal(
+				domain.Long,
+				symbol,
+				currentPrice,
+				time.Now(),
+				currentPrice*0.99, // 가격의 99% (1% 손절)
+				currentPrice*1.01, // 가격의 101% (1% 익절)
+			)
+			// 추가 필드 설정
+			macdSignal := testSignal.(*macdsarema.MACDSAREMASignal)
+			macdSignal.EMAValue = currentPrice * 0.95
+			macdSignal.MACDValue = 0.0015
+			macdSignal.SignalValue = 0.0010
+			macdSignal.SARValue = currentPrice * 0.98
+			macdSignal.EMAAbove = true
+			macdSignal.SARBelow = true
+			macdSignal.MACDCross = 1
 		} else {
-			testSignal = &strategy.Signal{
-				Type:       domain.Short,
-				Symbol:     symbol,
-				Price:      currentPrice,
-				Timestamp:  time.Now(),
-				StopLoss:   currentPrice * 1.01, // 가격의 101% (1% 손절)
-				TakeProfit: currentPrice * 0.99, // 가격의 99% (1% 익절)
-				Conditions: map[string]interface{}{
-					"EMALong":     false,
-					"EMAShort":    true,
-					"MACDLong":    false,
-					"MACDShort":   true,
-					"SARLong":     false,
-					"SARShort":    true,
-					"EMAValue":    currentPrice * 1.05, // 예시 값
-					"MACDValue":   -0.0015,             // 예시 값
-					"SignalValue": -0.0010,             // 예시 값
-					"SARValue":    currentPrice * 1.02, // 예시 값
-				},
-			}
+			testSignal = macdsarema.NewMACDSAREMASignal(
+				domain.Short,
+				symbol,
+				currentPrice,
+				time.Now(),
+				currentPrice*1.01, // 가격의 101% (1% 손절)
+				currentPrice*0.99, // 가격의 99% (1% 익절)
+			)
+			// 추가 필드 설정
+			macdSignal := testSignal.(*macdsarema.MACDSAREMASignal)
+			macdSignal.EMAValue = currentPrice * 1.05
+			macdSignal.MACDValue = -0.0015
+			macdSignal.SignalValue = -0.0010
+			macdSignal.SARValue = currentPrice * 1.02
+			macdSignal.EMAAbove = false
+			macdSignal.SARBelow = false
+			macdSignal.MACDCross = -1
 		}
 
 		// 시그널 알림 전송
@@ -280,7 +283,6 @@ func main() {
 			log.Printf("시그널 알림 전송 실패: %v", err)
 		}
 
-		// executeSignalTrade 직접 호출
 		if err := collector.ExecuteSignalTrade(ctx, testSignal); err != nil {
 			log.Printf("테스트 매매 실행 중 에러 발생: %v", err)
 			if err := discordClient.SendError(err); err != nil {
@@ -604,6 +606,139 @@ type LeverageBracket struct {
 package domain
 
 import "time"
+
+// SignalInterface는 모든 시그널 타입이 구현해야 하는 인터페이스입니다
+type SignalInterface interface {
+	// 기본 정보 조회 메서드
+	GetType() SignalType
+	GetSymbol() string
+	GetPrice() float64
+	GetTimestamp() time.Time
+	GetStopLoss() float64
+	GetTakeProfit() float64
+
+	// 유효성 검사
+	IsValid() bool
+
+	// 알림 데이터 변환 - 각 전략별 구현체에서 구체적으로 구현
+	ToNotificationData() map[string]interface{}
+
+	GetCondition(key string) (interface{}, bool)
+	SetCondition(key string, value interface{})
+	GetAllConditions() map[string]interface{}
+}
+
+// BaseSignal은 모든 시그널 구현체가 공유하는 기본 필드와 메서드를 제공합니다
+type BaseSignal struct {
+	Type       SignalType
+	Symbol     string
+	Price      float64
+	Timestamp  time.Time
+	StopLoss   float64
+	TakeProfit float64
+	Conditions map[string]interface{}
+}
+
+/// 생성자
+func NewBaseSignal(signalType SignalType, symbol string, price float64, timestamp time.Time, stopLoss, takeProfit float64) BaseSignal {
+	return BaseSignal{
+		Type:       signalType,
+		Symbol:     symbol,
+		Price:      price,
+		Timestamp:  timestamp,
+		StopLoss:   stopLoss,
+		TakeProfit: takeProfit,
+		Conditions: make(map[string]interface{}),
+	}
+}
+
+// GetType은 시그널 타입을 반환합니다
+func (s *BaseSignal) GetType() SignalType {
+	return s.Type
+}
+
+// GetSymbol은 시그널의 심볼을 반환합니다
+func (s *BaseSignal) GetSymbol() string {
+	return s.Symbol
+}
+
+// GetPrice는 시그널의 가격을 반환합니다
+func (s *BaseSignal) GetPrice() float64 {
+	return s.Price
+}
+
+// GetTimestamp는 시그널의 생성 시간을 반환합니다
+func (s *BaseSignal) GetTimestamp() time.Time {
+	return s.Timestamp
+}
+
+// GetStopLoss는 시그널의 손절가를 반환합니다
+func (s *BaseSignal) GetStopLoss() float64 {
+	return s.StopLoss
+}
+
+// GetTakeProfit는 시그널의 익절가를 반환합니다
+func (s *BaseSignal) GetTakeProfit() float64 {
+	return s.TakeProfit
+}
+
+// IsValid는 시그널이 유효한지 확인합니다
+func (s *BaseSignal) IsValid() bool {
+	return s.Type != NoSignal && s.Symbol != "" && s.Price > 0
+}
+
+// ToNotificationData는 알림 시스템에서 사용할 기본 데이터를 반환합니다
+// 구체적인 시그널 구현체에서 오버라이딩해야 합니다
+func (s *BaseSignal) ToNotificationData() map[string]interface{} {
+	data := map[string]interface{}{
+		"Type":       s.Type.String(),
+		"Symbol":     s.Symbol,
+		"Price":      s.Price,
+		"Timestamp":  s.Timestamp.Format("2006-01-02 15:04:05"),
+		"StopLoss":   s.StopLoss,
+		"TakeProfit": s.TakeProfit,
+	}
+
+	// 조건 정보 추가
+	if s.Conditions != nil {
+		for k, v := range s.Conditions {
+			data[k] = v
+		}
+	}
+
+	return data
+}
+
+// GetCondition는 특정 키의 조건 값을 반환합니다
+func (s *BaseSignal) GetCondition(key string) (interface{}, bool) {
+	if s.Conditions == nil {
+		return nil, false
+	}
+	value, exists := s.Conditions[key]
+	return value, exists
+}
+
+// SetCondition는 특정 키에 조건 값을 설정합니다
+func (s *BaseSignal) SetCondition(key string, value interface{}) {
+	if s.Conditions == nil {
+		s.Conditions = make(map[string]interface{})
+	}
+	s.Conditions[key] = value
+}
+
+// GetAllConditions는 모든 조건을 맵으로 반환합니다
+func (s *BaseSignal) GetAllConditions() map[string]interface{} {
+	// 원본 맵의 복사본 반환
+	if s.Conditions == nil {
+		return make(map[string]interface{})
+	}
+
+	result := make(map[string]interface{})
+	for k, v := range s.Conditions {
+		result[k] = v
+	}
+	return result
+}
 
 // SignalConditions는 시그널 발생 조건들의 상세 정보를 저장합니다
 type SignalConditions struct {
@@ -1336,10 +1471,10 @@ func (c *Client) GetLeverageBrackets(ctx context.Context, symbol string) ([]doma
 		Brackets []struct {
 			Bracket          int     `json:"bracket"`
 			InitialLeverage  int     `json:"initialLeverage"`
-			NotionalCap      float64 `json:"notionalCap,string"`
-			NotionalFloor    float64 `json:"notionalFloor,string"`
-			MaintMarginRatio float64 `json:"maintMarginRatio,string"`
-			Cum              float64 `json:"cum,string"`
+			NotionalCap      float64 `json:"notionalCap"`
+			NotionalFloor    float64 `json:"notionalFloor"`
+			MaintMarginRatio float64 `json:"maintMarginRatio"`
+			Cum              float64 `json:"cum"`
 		} `json:"brackets"`
 	}
 
@@ -2086,9 +2221,8 @@ import (
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/exchange"
-	"github.com/assist-by/phoenix/internal/indicator"
-	"github.com/assist-by/phoenix/internal/notification"
 	"github.com/assist-by/phoenix/internal/notification/discord"
+	"github.com/assist-by/phoenix/internal/position"
 	"github.com/assist-by/phoenix/internal/strategy"
 )
 
@@ -2102,22 +2236,30 @@ type RetryConfig struct {
 
 // Collector는 시장 데이터 수집기를 구현합니다
 type Collector struct {
-	exchange exchange.Exchange
-	discord  *discord.Client
-	strategy strategy.Strategy
-	config   *config.Config
+	exchange        exchange.Exchange
+	discord         *discord.Client
+	strategy        strategy.Strategy
+	config          *config.Config
+	positionManager position.Manager
 
 	retry RetryConfig
 	mu    sync.Mutex // RWMutex에서 일반 Mutex로 변경
 }
 
 // NewCollector는 새로운 데이터 수집기를 생성합니다
-func NewCollector(exchange exchange.Exchange, discord *discord.Client, strategy strategy.Strategy, config *config.Config, opts ...CollectorOption) *Collector {
+func NewCollector(exchange exchange.Exchange, discord *discord.Client, strategy strategy.Strategy, positionManager position.Manager, config *config.Config, opts ...CollectorOption) *Collector {
 	c := &Collector{
-		exchange: exchange,
-		discord:  discord,
-		strategy: strategy,
-		config:   config,
+		exchange:        exchange,
+		discord:         discord,
+		strategy:        strategy,
+		positionManager: positionManager,
+		config:          config,
+		retry: RetryConfig{
+			MaxRetries: 3,
+			BaseDelay:  1 * time.Second,
+			MaxDelay:   30 * time.Second,
+			Factor:     2.0,
+		},
 	}
 
 	for _, opt := range opts {
@@ -2154,10 +2296,13 @@ func (c *Collector) Collect(ctx context.Context) error {
 	var err error
 
 	if c.config.App.UseTopSymbols {
-
 		symbols, err = c.exchange.GetTopVolumeSymbols(ctx, c.config.App.TopSymbolsCount)
 		if err != nil {
-			return fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+			errMsg := fmt.Errorf("상위 거래량 심볼 조회 실패: %w", err)
+			if discordErr := c.discord.SendError(errMsg); discordErr != nil {
+				log.Printf("에러 알림 전송 실패: %v", discordErr)
+			}
+			return errMsg
 		}
 	} else {
 		// 설정된 심볼 사용
@@ -2169,11 +2314,14 @@ func (c *Collector) Collect(ctx context.Context) error {
 		}
 	}
 
-	// 각 심볼의 잔고 조회
-
+	// 잔고 정보 조회
 	balances, err := c.exchange.GetBalance(ctx)
 	if err != nil {
-		return err
+		errMsg := fmt.Errorf("잔고 조회 실패: %w", err)
+		if discordErr := c.discord.SendError(errMsg); discordErr != nil {
+			log.Printf("에러 알림 전송 실패: %v", discordErr)
+		}
+		return errMsg
 	}
 
 	// 잔고 정보 로깅 및 알림
@@ -2200,62 +2348,42 @@ func (c *Collector) Collect(ctx context.Context) error {
 
 			log.Printf("%s 심볼의 캔들 데이터 %d개 수집 완료", symbol, len(candles))
 
-			// 캔들 데이터를 indicator.PriceData로 변환
-			prices := make([]indicator.PriceData, len(candles))
-			for i, candle := range candles {
-				prices[i] = indicator.PriceData{
-					Time:   candle.OpenTime,
-					Open:   candle.Open,
-					High:   candle.High,
-					Low:    candle.Low,
-					Close:  candle.Close,
-					Volume: candle.Volume,
-				}
-			}
-
 			// 시그널 감지
-			s, err := c.strategy.Analyze(ctx, symbol, candles)
+			signal, err := c.strategy.Analyze(ctx, symbol, candles)
 			if err != nil {
 				log.Printf("시그널 감지 실패 (%s): %v", symbol, err)
 				return nil
 			}
 
 			// 시그널 정보 로깅
-			log.Printf("%s 시그널 감지 결과: %+v", symbol, s)
+			log.Printf("%s 시그널 감지 결과: %+v", symbol, signal)
 
-			if s != nil {
-				if err := c.discord.SendSignal(s); err != nil {
+			if signal != nil {
+				// Discord로 시그널 알림 전송
+				if err := c.discord.SendSignal(signal); err != nil {
 					log.Printf("시그널 알림 전송 실패 (%s): %v", symbol, err)
 				}
 
-				if s.Type != domain.NoSignal {
-
-					// 진입 가능 여부 확인
-					result, err := c.checkEntryAvailable(ctx, s)
-					if err != nil {
-						if err := c.discord.SendError(err); err != nil {
-							log.Printf("에러 알림 전송 실패: %v", err)
+				if signal.GetType() != domain.NoSignal {
+					// 매매 실행
+					if err := c.ExecuteSignalTrade(ctx, signal); err != nil {
+						errMsg := fmt.Errorf("매매 실행 실패 (%s): %w", symbol, err)
+						if discordErr := c.discord.SendError(errMsg); discordErr != nil {
+							log.Printf("에러 알림 전송 실패: %v", discordErr)
 						}
-
-					}
-
-					if result {
-						// 매매 실행
-						if err := c.ExecuteSignalTrade(ctx, s); err != nil {
-							c.discord.SendError(fmt.Errorf("매매 실행 실패: %v", err))
-						} else {
-							log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료",
-								s.Symbol, s.Type.String())
-						}
+						return errMsg
+					} else {
+						log.Printf("%s %s 포지션 진입 및 TP/SL 설정 완료", signal.GetSymbol(), signal.GetType().String())
 					}
 				}
 			}
 
 			return nil
 		})
+
 		if err != nil {
 			log.Printf("%s 심볼 데이터 수집 실패: %v", symbol, err)
-			continue
+			continue // 한 심볼 처리 실패해도 다음 심볼 진행
 		}
 	}
 
@@ -2327,492 +2455,30 @@ func (c *Collector) CalculatePosition(
 	}, nil
 }
 
-// findDomainBracket은 주어진 레버리지에 해당하는 브라켓을 찾습니다
-func findDomainBracket(brackets []domain.LeverageBracket, leverage int) *domain.LeverageBracket {
-	// 레버리지가 높은 순으로 정렬되어 있으므로,
-	// 설정된 레버리지보다 크거나 같은 첫 번째 브라켓을 찾습니다.
-	for i := len(brackets) - 1; i >= 0; i-- {
-		if brackets[i].InitialLeverage >= leverage {
-			return &brackets[i]
-		}
-	}
-
-	// 찾지 못한 경우 가장 낮은 레버리지 브라켓 반환
-	if len(brackets) > 0 {
-		return &brackets[0]
-	}
-	return nil
-}
-func (c *Collector) checkEntryAvailable(ctx context.Context, coinSignal *strategy.Signal) (bool, error) {
-	// 1. 현재 포지션 조회
-	positions, err := c.exchange.GetPositions(ctx)
-	if err != nil {
-		return false, fmt.Errorf("포지션 조회 실패: %w", err)
-	}
-
-	// 기존 포지션 확인
-	var existingPosition *domain.Position
-	for _, pos := range positions {
-		if pos.Symbol == coinSignal.Symbol && pos.Quantity != 0 {
-			existingPosition = &pos
-			break
-		}
-	}
-
-	// 포지션이 없으면 바로 진행 가능
-	if existingPosition == nil {
-		log.Printf("활성 포지션 없음: %s", coinSignal.Symbol)
-
-		// 2. 열린 주문 확인 및 취소
-		return c.cancelOpenOrders(ctx, coinSignal.Symbol)
-	}
-
-	// 현재 포지션 방향 확인
-	currentPositionIsLong := existingPosition.PositionSide == "LONG" ||
-		(existingPosition.PositionSide == "BOTH" && existingPosition.Quantity > 0)
-
-	// 새 시그널 방향 확인
-	newSignalIsLong := coinSignal.Type == domain.Long
-
-	// 같은 방향의 시그널이면 진입 불가
-	if currentPositionIsLong == newSignalIsLong {
-		return false, fmt.Errorf("이미 같은 방향의 %s 포지션이 존재합니다: 수량: %.8f, 방향: %s",
-			existingPosition.Symbol, math.Abs(existingPosition.Quantity), existingPosition.PositionSide)
-	}
-
-	// 반대 방향 시그널이면 기존 포지션 청산 후 진행
-	log.Printf("반대 방향 시그널 감지: 기존 %s 포지션 청산 후 %s 진입 예정",
-		existingPosition.PositionSide,
-		map[bool]string{true: "LONG", false: "SHORT"}[newSignalIsLong])
-
-	// 1) 기존 주문 취소
-	cancelled, err := c.cancelOpenOrders(ctx, coinSignal.Symbol)
-	if !cancelled || err != nil {
-		return false, fmt.Errorf("기존 주문 취소 실패: %w", err)
-	}
-
-	// 2) 시장가로 포지션 청산
-	err = c.closePositionAtMarket(ctx, existingPosition)
-	if err != nil {
-		return false, fmt.Errorf("포지션 청산 실패: %w", err)
-	}
-
-	// 3) 포지션이 제대로 청산되었는지 확인
-	cleared, err := c.confirmPositionClosed(ctx, coinSignal.Symbol)
-	if !cleared || err != nil {
-		return false, fmt.Errorf("포지션 청산 확인 실패: %w", err)
-	}
-
-	// 디스코드로 알림
-	if c.discord != nil {
-		c.discord.SendInfo(fmt.Sprintf("기존 %s 포지션을 청산하고 %s 시그널 진행 준비 완료",
-			existingPosition.PositionSide,
-			map[bool]string{true: "LONG", false: "SHORT"}[newSignalIsLong]))
-	}
-
-	return true, nil
-}
-
-// cancelOpenOrders는 특정 심볼에 대한 모든 열린 주문을 취소합니다
-func (c *Collector) cancelOpenOrders(ctx context.Context, symbol string) (bool, error) {
-	openOrders, err := c.exchange.GetOpenOrders(ctx, symbol)
-	if err != nil {
-		return false, fmt.Errorf("주문 조회 실패: %w", err)
-	}
-
-	// 기존 TP/SL 주문 취소
-	if len(openOrders) > 0 {
-		log.Printf("%s의 기존 주문 %d개를 취소합니다.", symbol, len(openOrders))
-		for _, order := range openOrders {
-			if err := c.exchange.CancelOrder(ctx, symbol, order.OrderID); err != nil {
-				log.Printf("주문 취소 실패 (ID: %d): %v", order.OrderID, err)
-				return false, fmt.Errorf("주문 취소 실패 (ID: %d): %w", order.OrderID, err)
-			}
-			log.Printf("주문 취소 성공: %s %s (ID: %d)", order.Type, order.Side, order.OrderID)
-		}
-	}
-
-	return true, nil
-}
-
-// confirmPositionClosed는 포지션이 제대로 청산되었는지 확인합니다
-func (c *Collector) confirmPositionClosed(ctx context.Context, symbol string) (bool, error) {
-	// 포지션이 청산되었는지 확인 (최대 5회 시도)
-	maxRetries := 5
-	retryInterval := 1 * time.Second
-
-	for i := 0; i < maxRetries; i++ {
-		positions, err := c.exchange.GetPositions(ctx)
-		if err != nil {
-			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
-			time.Sleep(retryInterval)
-			continue
-		}
-
-		// 해당 심볼의 포지션이 있는지 확인
-		positionExists := false
-		for _, pos := range positions {
-			if pos.Symbol == symbol && math.Abs(pos.Quantity) > 0 {
-				positionExists = true
-				break
-			}
-		}
-
-		if !positionExists {
-			log.Printf("%s 포지션 청산 확인 완료", symbol)
-			return true, nil
-		}
-
-		log.Printf("%s 포지션 청산 대기 중... (시도 %d/%d)", symbol, i+1, maxRetries)
-		time.Sleep(retryInterval)
-		retryInterval *= 2 // 지수 백오프
-	}
-
-	return false, fmt.Errorf("최대 재시도 횟수 초과: 포지션이 청산되지 않음")
-}
-
-// closePositionAtMarket는 시장가로 포지션을 청산합니다
-func (c *Collector) closePositionAtMarket(ctx context.Context, position *domain.Position) error {
-	// 포지션 방향에 따라 반대 주문 생성
-	side := Buy
-	positionSide := Long
-
-	if position.PositionSide == "LONG" || (position.PositionSide == "BOTH" && position.Quantity > 0) {
-		side = Sell
-		positionSide = Long
-	} else {
-		side = Buy
-		positionSide = Short
-	}
-
-	// 포지션 수량 (절대값 사용)
-	quantity := math.Abs(position.Quantity)
-
-	// 시장가 청산 주문
-	closeOrder := domain.OrderRequest{
-		Symbol:       position.Symbol,
-		Side:         domain.OrderSide(side),
-		PositionSide: domain.PositionSide(positionSide),
-		Type:         domain.Market,
-		Quantity:     quantity,
-	}
-
-	// 주문 실행
-	orderResponse, err := c.exchange.PlaceOrder(ctx, closeOrder)
-	if err != nil {
-		return fmt.Errorf("포지션 청산 주문 실패: %w", err)
-	}
-
-	log.Printf("포지션 청산 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
-		position.Symbol, quantity, orderResponse.OrderID)
-
-	return nil
-}
-
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.
 // ExecuteSignalTrade는 감지된 시그널에 따라 매매를 실행합니다
-func (c *Collector) ExecuteSignalTrade(ctx context.Context, s *strategy.Signal) error {
-	if s.Type == domain.NoSignal {
+func (c *Collector) ExecuteSignalTrade(ctx context.Context, s domain.SignalInterface) error {
+	if s.GetType() == domain.NoSignal {
 		return nil // 시그널이 없으면 아무것도 하지 않음
 	}
 
-	//---------------------------------
-	// 1. 잔고 조회
-	//---------------------------------
+	// 포지션 요청 객체 생성
+	req := &position.PositionRequest{
+		Signal:     s,
+		Leverage:   c.config.Trading.Leverage,
+		RiskFactor: 0.9, // 계정 잔고의 90% 사용 (설정에서 가져올 수도 있음)
+	}
 
-	balances, err := c.exchange.GetBalance(ctx)
+	// 포지션 매니저를 통해 포지션 오픈
+	_, err := c.positionManager.OpenPosition(ctx, req)
 	if err != nil {
-		return fmt.Errorf("잔고 조회 실패: %w", err)
-	}
-
-	//---------------------------------
-	// 2. USDT 잔고 확인
-	//---------------------------------
-	usdtBalance, exists := balances["USDT"]
-	if !exists || usdtBalance.Available <= 0 {
-		return fmt.Errorf("USDT 잔고가 부족합니다")
-	}
-
-	//---------------------------------
-	// 3. 현재 가격 조회 (최근 캔들 사용)
-	//---------------------------------
-
-	candles, err := c.exchange.GetKlines(ctx, s.Symbol, "1m", 1)
-	if err != nil {
-		return fmt.Errorf("가격 정보 조회 실패: %w", err)
-	}
-	if len(candles) == 0 {
-		return fmt.Errorf("캔들 데이터를 가져오지 못했습니다")
-	}
-	currentPrice := candles[0].Close
-
-	//---------------------------------
-	// 4. 심볼 정보 조회
-	//---------------------------------
-
-	symbolInfo, err := c.exchange.GetSymbolInfo(ctx, s.Symbol)
-
-	if err != nil {
-		return fmt.Errorf("심볼 정보 조회 실패: %w", err)
-	}
-
-	//---------------------------------
-	// 5. HEDGE 모드 설정
-	//---------------------------------
-
-	err = c.exchange.SetPositionMode(ctx, true)
-
-	if err != nil {
-		return fmt.Errorf("HEDGE 모드 설정 실패: %w", err)
-	}
-
-	//---------------------------------
-	// 6. 레버리지 설정
-	//---------------------------------
-	leverage := c.config.Trading.Leverage
-	err = c.exchange.SetLeverage(ctx, s.Symbol, leverage)
-	if err != nil {
-		return fmt.Errorf("레버리지 설정 실패: %w", err)
-	}
-
-	//---------------------------------
-	// 7. 매수 수량 계산 (잔고의 90% 사용)
-	//---------------------------------
-	// 레버리지 브라켓 정보 조회
-	brackets, err := c.exchange.GetLeverageBrackets(ctx, s.Symbol)
-	if err != nil {
-		return fmt.Errorf("레버리지 브라켓 조회 실패: %w", err)
-	}
-
-	if len(brackets) == 0 {
-		return fmt.Errorf("레버리지 브라켓 정보가 없습니다")
-	}
-
-	bracket := findDomainBracket(brackets, leverage)
-	if bracket == nil {
-		return fmt.Errorf("적절한 레버리지 브라켓을 찾을 수 없습니다")
-	}
-
-	// 포지션 크기 계산
-	positionResult, err := c.CalculatePosition(
-		usdtBalance.Available,
-		usdtBalance.CrossWalletBalance,
-		leverage,
-		currentPrice,
-		symbolInfo.StepSize,
-		bracket.MaintMarginRatio,
-	)
-	if err != nil {
-		return fmt.Errorf("포지션 계산 실패: %w", err)
-	}
-
-	// 최소 주문 가치 체크
-	if positionResult.PositionValue < symbolInfo.MinNotional {
-		return fmt.Errorf("포지션 크기가 최소 주문 가치(%.2f USDT)보다 작습니다", symbolInfo.MinNotional)
-	}
-
-	//---------------------------------
-	// 8. 주문 수량 정밀도 조정
-	//---------------------------------
-	adjustedQuantity := domain.AdjustQuantity(
-		positionResult.Quantity,
-		symbolInfo.StepSize,
-		symbolInfo.QuantityPrecision,
-	)
-
-	//---------------------------------
-	// 9. 진입 주문 생성
-	//---------------------------------
-	orderSide := Buy
-	positionSide := Long
-	if s.Type == domain.Short {
-		orderSide = Sell
-		positionSide = Short
-	}
-
-	entryOrder := domain.OrderRequest{
-		Symbol:       s.Symbol,
-		Side:         domain.OrderSide(orderSide),
-		PositionSide: domain.PositionSide(positionSide),
-		Type:         domain.Market,
-		Quantity:     adjustedQuantity,
-	}
-
-	//---------------------------------
-	// 10. 진입 주문 실행
-	//---------------------------------
-	orderResponse, err := c.exchange.PlaceOrder(ctx, entryOrder)
-	if err != nil {
-		return fmt.Errorf("주문 실행 실패: %w", err)
-	}
-
-	//---------------------------------
-	// 11. 성공 메시지 출력 및 로깅
-	//---------------------------------
-	log.Printf("매수 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
-		s.Symbol, adjustedQuantity, orderResponse.OrderID)
-
-	//---------------------------------
-	// 12. 포지션 확인 및 TP/SL 설정
-	//---------------------------------
-	maxRetries := 5
-	retryInterval := 1 * time.Second
-	var position *domain.Position
-
-	// 목표 포지션 사이드 문자열로 변환
-	targetPositionSide := domain.LongPosition
-	if s.Type == domain.Short {
-		targetPositionSide = domain.ShortPosition
-	}
-
-	for i := 0; i < maxRetries; i++ {
-
-		positions, err := c.exchange.GetPositions(ctx)
-		if err != nil {
-			log.Printf("포지션 조회 실패 (시도 %d/%d): %v", i+1, maxRetries, err)
-			time.Sleep(retryInterval)
-			continue
+		// 에러 발생 시 Discord 알림 전송
+		errorMsg := fmt.Sprintf("포지션 진입 실패 (%s): %v", s.GetSymbol(), err)
+		if discordErr := c.discord.SendError(fmt.Errorf(errorMsg)); discordErr != nil {
+			log.Printf("에러 알림 전송 실패: %v", discordErr)
 		}
 
-		for _, pos := range positions {
-			// 포지션 사이드 문자열 비교
-			if pos.Symbol == s.Symbol && pos.PositionSide == targetPositionSide {
-				// Long은 수량이 양수, Short은 음수이기 때문에 조건 분기
-				positionValid := false
-				if targetPositionSide == domain.LongPosition && pos.Quantity > 0 {
-					positionValid = true
-				} else if targetPositionSide == domain.ShortPosition && pos.Quantity < 0 {
-					positionValid = true
-				}
-
-				if positionValid {
-					position = &pos
-					// log.Printf("포지션 확인: %s %s, 수량: %.8f, 진입가: %.2f",
-					// 	pos.Symbol, pos.PositionSide, math.Abs(pos.Quantity), pos.EntryPrice)
-					break
-				}
-			}
-		}
-
-		if position != nil {
-			break
-		}
-		time.Sleep(retryInterval)
-		retryInterval *= 2 // 지수 백오프
-	}
-
-	if position == nil {
-		return fmt.Errorf("최대 재시도 횟수 초과: 포지션을 찾을 수 없음")
-	}
-
-	//---------------------------------
-	// 13. TP/SL 값 설정
-	//---------------------------------
-	// 종료 주문을 위한 반대 방향 계산
-
-	actualEntryPrice := position.EntryPrice
-	actualQuantity := math.Abs(position.Quantity)
-
-	var stopLoss, takeProfit float64
-	if s.Type == domain.Long {
-		slDistance := s.Price - s.StopLoss
-		tpDistance := s.TakeProfit - s.Price
-		stopLoss = actualEntryPrice - slDistance
-		takeProfit = actualEntryPrice + tpDistance
-	} else {
-		slDistance := s.StopLoss - s.Price
-		tpDistance := s.Price - s.TakeProfit
-		stopLoss = actualEntryPrice + slDistance
-		takeProfit = actualEntryPrice - tpDistance
-	}
-
-	// 가격 정밀도에 맞게 조정
-	// symbolInfo.TickSize와 symbolInfo.PricePrecision 사용
-	adjustStopLoss := domain.AdjustPrice(stopLoss, symbolInfo.TickSize, symbolInfo.PricePrecision)
-	adjustTakeProfit := domain.AdjustPrice(takeProfit, symbolInfo.TickSize, symbolInfo.PricePrecision)
-
-	// 실제 계산된 비율로 메시지 생성
-	slPctChange := ((adjustStopLoss - actualEntryPrice) / actualEntryPrice) * 100
-	tpPctChange := ((adjustTakeProfit - actualEntryPrice) / actualEntryPrice) * 100
-
-	// Short 포지션인 경우 부호 반전 (Short에서는 손절은 가격 상승, 익절은 가격 하락)
-	if s.Type == domain.Short {
-		slPctChange = -slPctChange
-		tpPctChange = -tpPctChange
-	}
-
-	// TP/SL 설정 알림
-	if err := c.discord.SendInfo(fmt.Sprintf(
-		"TP/SL 설정 중: %s\n진입가: %.2f\n수량: %.8f\n손절가: %.2f (%.2f%%)\n목표가: %.2f (%.2f%%)",
-		s.Symbol, actualEntryPrice, actualQuantity, adjustStopLoss, slPctChange, adjustTakeProfit, tpPctChange)); err != nil {
-		log.Printf("TP/SL 설정 알림 전송 실패: %v", err)
-	}
-
-	//---------------------------------
-	// 14. TP/SL 주문 생성
-	//---------------------------------
-	oppositeSide := Sell
-	if s.Type == domain.Short {
-		oppositeSide = Buy
-	}
-	// 손절 주문 생성
-	slOrder := domain.OrderRequest{
-		Symbol:       s.Symbol,
-		Side:         domain.OrderSide(oppositeSide),
-		PositionSide: domain.PositionSide(positionSide),
-		Type:         domain.StopMarket,
-		Quantity:     actualQuantity,
-		StopPrice:    adjustStopLoss,
-	}
-	// 손절 주문 실행
-
-	slResponse, err := c.exchange.PlaceOrder(ctx, slOrder)
-	if err != nil {
-		log.Printf("손절(SL) 주문 실패: %v", err)
-		return fmt.Errorf("손절(SL) 주문 실패: %w", err)
-	}
-
-	// 익절 주문 생성
-	tpOrder := domain.OrderRequest{
-		Symbol:       s.Symbol,
-		Side:         domain.OrderSide(oppositeSide),
-		PositionSide: domain.PositionSide(positionSide),
-		Type:         domain.TakeProfitMarket,
-		Quantity:     actualQuantity,
-		StopPrice:    adjustTakeProfit,
-	}
-	// 익절 주문 실행
-
-	tpResponse, err := c.exchange.PlaceOrder(ctx, tpOrder)
-	if err != nil {
-		log.Printf("익절(TP) 주문 실패: %v", err)
-		return fmt.Errorf("익절(TP) 주문 실패: %w", err)
-	}
-
-	//---------------------------------
-	// 15. TP/SL 설정 완료 알림
-	//---------------------------------
-	if err := c.discord.SendInfo(fmt.Sprintf("✅ TP/SL 설정 완료: %s\n익절(TP) 주문 성공: ID=%d 심볼=%s, 가격=%.2f, 수량=%.8f\n손절(SL) 주문 생성: ID=%d 심볼=%s, 가격=%.2f, 수량=%.8f", s.Symbol, tpResponse.OrderID, tpOrder.Symbol, tpOrder.StopPrice, tpOrder.Quantity, slResponse.OrderID, slOrder.Symbol, slOrder.StopPrice, slOrder.Quantity)); err != nil {
-		log.Printf("TP/SL 설정 알림 전송 실패: %v", err)
-	}
-
-	//---------------------------------
-	// 16. 거래 정보 생성 및 전송
-	//---------------------------------
-	tradeInfo := notification.TradeInfo{
-		Symbol:        s.Symbol,
-		PositionType:  string(targetPositionSide),
-		PositionValue: positionResult.PositionValue,
-		Quantity:      actualQuantity,
-		EntryPrice:    actualEntryPrice,
-		StopLoss:      adjustStopLoss,
-		TakeProfit:    adjustTakeProfit,
-		Balance:       usdtBalance.Available - positionResult.PositionValue,
-		Leverage:      leverage,
-	}
-
-	if err := c.discord.SendTradeInfo(tradeInfo); err != nil {
-		log.Printf("거래 정보 알림 전송 실패: %v", err)
+		return fmt.Errorf("매매 실행 실패: %w", err)
 	}
 
 	return nil
@@ -3124,24 +2790,29 @@ func (e *Embed) SetTimestamp(t time.Time) *Embed {
 }
 
 ```
-## internal/notification/discord/signal.go
+## internal/notification/discord/webhook.go
 ```go
 package discord
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/notification"
-	"github.com/assist-by/phoenix/internal/strategy"
 )
 
 // SendSignal은 시그널 알림을 Discord로 전송합니다
-func (c *Client) SendSignal(s *strategy.Signal) error {
+func (c *Client) SendSignal(s domain.SignalInterface) error {
+	if s == nil {
+		return fmt.Errorf("nil signal received")
+	}
+
 	var title, emoji string
 	var color int
 
-	switch s.Type {
+	switch s.GetType() {
 	case domain.Long:
 		emoji = "🚀"
 		title = "LONG"
@@ -3164,128 +2835,94 @@ func (c *Client) SendSignal(s *strategy.Signal) error {
 		color = notification.ColorInfo
 	}
 
-	// 시그널 조건 상태 표시
-	longConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 위)
-%s MACD (시그널 상향돌파)
-%s SAR (SAR이 가격 아래)`,
-		getCheckMark(s.Conditions["EMALong"].(bool)),
-		getCheckMark(s.Conditions["MACDLong"].(bool)),
-		getCheckMark(s.Conditions["SARLong"].(bool)))
-
-	shortConditions := fmt.Sprintf(`%s EMA200 (가격이 EMA 아래)
-		%s MACD (시그널 하향돌파)
-		%s SAR (SAR이 가격 위)`,
-		getCheckMark(s.Conditions["EMAShort"].(bool)),
-		getCheckMark(s.Conditions["MACDShort"].(bool)),
-		getCheckMark(s.Conditions["SARShort"].(bool)))
-
-	// 기술적 지표 값
-	technicalValues := fmt.Sprintf("```\n[EMA200]: %.5f\n[MACD Line]: %.5f\n[Signal Line]: %.5f\n[Histogram]: %.5f\n[SAR]: %.5f```",
-		s.Conditions["EMAValue"].(float64),
-		s.Conditions["MACDValue"].(float64),
-		s.Conditions["SignalValue"].(float64),
-		s.Conditions["MACDValue"].(float64)-s.Conditions["SignalValue"].(float64),
-		s.Conditions["SARValue"].(float64))
+	// 알림 데이터 가져오기
+	notificationData := s.ToNotificationData()
 
 	embed := NewEmbed().
-		SetTitle(fmt.Sprintf("%s %s %s/USDT", emoji, title, s.Symbol)).
+		SetTitle(fmt.Sprintf("%s %s %s/USDT", emoji, title, s.GetSymbol())).
 		SetColor(color)
 
-	if s.Type != domain.NoSignal {
+	// 기본 정보 설정 - 모든 시그널 타입에 공통
+	if s.GetType() != domain.NoSignal {
 		// 손익률 계산 및 표시
 		var slPct, tpPct float64
-		switch s.Type {
+		switch s.GetType() {
 		case domain.Long:
 			// Long: 실제 수치 그대로 표시
-			slPct = (s.StopLoss - s.Price) / s.Price * 100
-			tpPct = (s.TakeProfit - s.Price) / s.Price * 100
+			slPct = (s.GetStopLoss() - s.GetPrice()) / s.GetPrice() * 100
+			tpPct = (s.GetTakeProfit() - s.GetPrice()) / s.GetPrice() * 100
 		case domain.Short:
 			// Short: 부호 반대로 표시
-			slPct = (s.Price - s.StopLoss) / s.Price * 100
-			tpPct = (s.Price - s.TakeProfit) / s.Price * 100
+			slPct = (s.GetPrice() - s.GetStopLoss()) / s.GetPrice() * 100
+			tpPct = (s.GetPrice() - s.GetTakeProfit()) / s.GetPrice() * 100
 		}
 
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
  **현재가**: $%.2f
  **손절가**: $%.2f (%.2f%%)
  **목표가**: $%.2f (%.2f%%)`,
-			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-			s.Price,
-			s.StopLoss,
+			s.GetTimestamp().Format("2006-01-02 15:04:05 KST"),
+			s.GetPrice(),
+			s.GetStopLoss(),
 			slPct,
-			s.TakeProfit,
+			s.GetTakeProfit(),
 			tpPct,
 		))
-	} else if s.Type == domain.PendingLong || s.Type == domain.PendingShort {
+	} else if s.GetType() == domain.PendingLong || s.GetType() == domain.PendingShort {
 		// 대기 상태 정보 표시
 		var waitingFor string
-		if s.Type == domain.PendingLong {
-			waitingFor = "SAR가 캔들 아래로 이동 대기 중"
+		if s.GetType() == domain.PendingLong {
+			waitingFor = "진입 대기 중"
 		} else {
-			waitingFor = "SAR가 캔들 위로 이동 대기 중"
+			waitingFor = "진입 대기 중"
+		}
+
+		// notificationData에서 대기 상태 설명이 있으면 사용
+		if waitDesc, hasWaitDesc := notificationData["대기상태"]; hasWaitDesc {
+			waitingFor = waitDesc.(string)
 		}
 
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
 **현재가**: $%.2f
-**대기 상태**: %s
-**조건**: MACD 크로스 발생, SAR 위치 부적절`,
-			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-			s.Price,
+**대기 상태**: %s`,
+			s.GetTimestamp().Format("2006-01-02 15:04:05 KST"),
+			s.GetPrice(),
 			waitingFor,
 		))
 	} else {
 		embed.SetDescription(fmt.Sprintf(`**시간**: %s
  **현재가**: $%.2f`,
-			s.Timestamp.Format("2006-01-02 15:04:05 KST"),
-			s.Price,
+			s.GetTimestamp().Format("2006-01-02 15:04:05 KST"),
+			s.GetPrice(),
 		))
 	}
 
-	embed.AddField("LONG 조건", longConditions, true)
-	embed.AddField("SHORT 조건", shortConditions, true)
-	embed.AddField("기술적 지표", technicalValues, false)
+	// 전략별 필드들 추가
+	// 전략은 ToNotificationData에서 "필드" 키로 필드 목록을 제공할 수 있음
+	if fields, hasFields := notificationData["필드"].([]map[string]interface{}); hasFields {
+		for _, field := range fields {
+			name, _ := field["name"].(string)
+			value, _ := field["value"].(string)
+			inline, _ := field["inline"].(bool)
+			embed.AddField(name, value, inline)
+		}
+	} else {
+		// 기본 필드 추가 (전략이 "필드"를 제공하지 않는 경우)
+		// 기술적 지표 요약 표시
+		if technicalSummary, hasSummary := notificationData["기술지표요약"].(string); hasSummary {
+			embed.AddField("기술적 지표", technicalSummary, false)
+		}
+
+		// 기타 조건들 표시
+		if conditions, hasConditions := notificationData["조건"].(string); hasConditions {
+			embed.AddField("조건", conditions, false)
+		}
+	}
 
 	return c.sendToWebhook(c.signalWebhook, WebhookMessage{
 		Embeds: []Embed{*embed},
 	})
 }
-
-func getCheckMark(condition bool) string {
-	if condition {
-		return "✅"
-	}
-	return "❌"
-}
-
-```
-## internal/notification/discord/webhook.go
-```go
-package discord
-
-import (
-	"fmt"
-	"strings"
-	"time"
-
-	"github.com/assist-by/phoenix/internal/notification"
-)
-
-// SendSignal은 시그널 알림을 전송합니다
-// func (c *Client) SendSignal(signal notification.Signal) error {
-// 	embed := NewEmbed().
-// 		SetTitle(fmt.Sprintf("트레이딩 시그널: %s", signal.Symbol)).
-// 		SetDescription(fmt.Sprintf("**타입**: %s\n**가격**: $%.2f\n**이유**: %s",
-// 			signal.Type, signal.Price, signal.Reason)).
-// 		SetColor(getColorForSignal(signal.Type)).
-// 		SetFooter("Assist by Trading Bot 🤖").
-// 		SetTimestamp(signal.Timestamp)
-
-// 	msg := WebhookMessage{
-// 		Embeds: []Embed{*embed},
-// 	}
-
-// 	return c.sendToWebhook(c.signalWebhook, msg)
-// }
 
 // SendError는 에러 알림을 전송합니다
 func (c *Client) SendError(err error) error {
@@ -3345,41 +2982,32 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	return c.sendToWebhook(c.tradeWebhook, msg)
 }
 
+func getCheckMark(condition bool) string {
+	if condition {
+		return "✅"
+	}
+	return "❌"
+}
+
 ```
 ## internal/notification/types.go
 ```go
 package notification
 
-import "time"
-
-// SignalType은 트레이딩 시그널 종류를 정의합니다
-type SignalType string
+import "github.com/assist-by/phoenix/internal/domain"
 
 const (
-	SignalLong         SignalType = "LONG"
-	SignalShort        SignalType = "SHORT"
-	SignalClose        SignalType = "CLOSE"
-	SignalPendingLong  SignalType = "PENDINGLONG"  // 롱 대기 상태
-	SignalPendingShort SignalType = "PENDINGSHORT" // 숏 대기 상태
-	ColorSuccess                  = 0x00FF00
-	ColorError                    = 0xFF0000
-	ColorInfo                     = 0x0000FF
-	ColorWarning                  = 0xFFA500 // 대기 상태를 위한 주황색 추가
+	ColorSuccess = 0x00FF00 // 녹색
+	ColorError   = 0xFF0000 // 빨간색
+	ColorInfo    = 0x0000FF // 파란색
+	ColorWarning = 0xFFA500 // 주황색
 )
-
-// Signal은 트레이딩 시그널 정보를 담는 구조체입니다
-type Signal struct {
-	Type      SignalType
-	Symbol    string
-	Price     float64
-	Timestamp time.Time
-	Reason    string
-}
 
 // Notifier는 알림 전송 인터페이스를 정의합니다
 type Notifier interface {
 	// SendSignal은 트레이딩 시그널 알림을 전송합니다
-	SendSignal(signal Signal) error
+	// 기존: SendSignal(signal *strategy.Signal) error
+	SendSignal(signal domain.SignalInterface) error
 
 	// SendError는 에러 알림을 전송합니다
 	SendError(err error) error
@@ -3404,7 +3032,7 @@ type TradeInfo struct {
 	Leverage      int     // 사용 레버리지
 }
 
-// getColorForPosition은 포지션 타입에 따른 색상을 반환합니다
+// GetColorForPosition은 포지션 타입에 따른 색상을 반환합니다
 func GetColorForPosition(positionType string) int {
 	switch positionType {
 	case "LONG":
@@ -3459,8 +3087,8 @@ func NewManager(exchange exchange.Exchange, notifier notification.Notifier, stra
 
 // OpenPosition은 시그널에 따라 새 포지션을 생성합니다
 func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position.PositionRequest) (*position.PositionResult, error) {
-	symbol := req.Signal.Symbol
-	signalType := req.Signal.Type
+	symbol := req.Signal.GetSymbol()
+	signalType := req.Signal.GetType()
 
 	// 1. 진입 가능 여부 확인
 	available, err := m.IsEntryAvailable(ctx, symbol, signalType)
@@ -3545,12 +3173,16 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 	if err != nil {
 		return nil, position.NewPositionError(symbol, "calculate_position", err)
 	}
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("💰 포지션 계산: %.2f USDT, 수량: %.8f",
+			posResult.PositionValue, posResult.Quantity))
+	}
 
 	// 9. 수량 정밀도 조정
 	adjustedQuantity := domain.AdjustQuantity(posResult.Quantity, symbolInfo.StepSize, symbolInfo.QuantityPrecision)
 
 	// 10. 포지션 방향 결정
-	positionSide := position.GetPositionSideFromSignal(req.Signal.Type)
+	positionSide := position.GetPositionSideFromSignal(req.Signal.GetType())
 	orderSide := position.GetOrderSideForEntry(positionSide)
 
 	// 11. 진입 주문 생성
@@ -3568,8 +3200,10 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 		return nil, position.NewPositionError(symbol, "place_entry_order", err)
 	}
 
-	log.Printf("포지션 진입 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
-		symbol, adjustedQuantity, orderResponse.OrderID)
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("✅ 포지션 진입 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
+			symbol, adjustedQuantity, orderResponse.OrderID))
+	}
 
 	// 13. 포지션 확인
 	var actualPosition *domain.Position
@@ -3600,8 +3234,8 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 
 	// 14. TP/SL 설정
 	// 시그널에서 직접 TP/SL 값 사용
-	stopLoss := domain.AdjustPrice(req.Signal.StopLoss, symbolInfo.TickSize, symbolInfo.PricePrecision)
-	takeProfit := domain.AdjustPrice(req.Signal.TakeProfit, symbolInfo.TickSize, symbolInfo.PricePrecision)
+	stopLoss := domain.AdjustPrice(req.Signal.GetStopLoss(), symbolInfo.TickSize, symbolInfo.PricePrecision)
+	takeProfit := domain.AdjustPrice(req.Signal.GetTakeProfit(), symbolInfo.TickSize, symbolInfo.PricePrecision)
 
 	// 15. TP/SL 주문 생성
 	exitSide := position.GetOrderSideForExit(positionSide)
@@ -3637,6 +3271,11 @@ func (m *BinancePositionManager) OpenPosition(ctx context.Context, req *position
 	if err != nil {
 		log.Printf("익절 주문 실패: %v", err)
 		// 진입은 성공했으므로 에러는 기록만 하고 계속 진행
+	}
+
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("🔄 TP/SL 설정 완료: %s\n손절(SL): %.2f\n익절(TP): %.2f",
+			symbol, stopLoss, takeProfit))
 	}
 
 	// 17. 결과 생성
@@ -3707,8 +3346,10 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 			}
 
 			// 반대 방향의 포지션이 있으면 청산 필요
-			log.Printf("반대 방향 포지션 감지: %s, 수량: %.8f, 방향: %s",
-				symbol, math.Abs(pos.Quantity), pos.PositionSide)
+			if m.notifier != nil {
+				m.notifier.SendInfo(fmt.Sprintf("반대 방향 포지션 감지: %s, 수량: %.8f, 방향: %s",
+					symbol, math.Abs(pos.Quantity), pos.PositionSide))
+			}
 
 			// 기존 주문 취소
 			if err := m.CancelAllOrders(ctx, symbol); err != nil {
@@ -3746,7 +3387,9 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 				}
 
 				if cleared {
-					log.Printf("%s 포지션 청산 확인 완료", symbol)
+					if m.notifier != nil {
+						m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션이 성공적으로 청산되었습니다.", symbol))
+					}
 					return true, nil
 				}
 
@@ -3786,14 +3429,17 @@ func (m *BinancePositionManager) CancelAllOrders(ctx context.Context, symbol str
 	}
 
 	if len(openOrders) > 0 {
-		log.Printf("%s의 기존 주문 %d개를 취소합니다.", symbol, len(openOrders))
-
 		for _, order := range openOrders {
 			if err := m.exchange.CancelOrder(ctx, symbol, order.OrderID); err != nil {
 				log.Printf("주문 취소 실패 (ID: %d): %v", order.OrderID, err)
 				return fmt.Errorf("주문 취소 실패 (ID: %d): %w", order.OrderID, err)
 			}
 			log.Printf("주문 취소 성공: %s %s (ID: %d)", order.Type, order.Side, order.OrderID)
+		}
+
+		if m.notifier != nil {
+			m.notifier.SendInfo(fmt.Sprintf("🗑️ %s의 기존 주문 %d개가 모두 취소되었습니다.",
+				symbol, len(openOrders)))
 		}
 	}
 
@@ -3843,8 +3489,10 @@ func (m *BinancePositionManager) ClosePosition(ctx context.Context, symbol strin
 		return nil, position.NewPositionError(symbol, "place_close_order", err)
 	}
 
-	log.Printf("포지션 청산 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
-		symbol, math.Abs(targetPosition.Quantity), orderResponse.OrderID)
+	if m.notifier != nil {
+		m.notifier.SendInfo(fmt.Sprintf("🔴 포지션 청산 주문 성공: %s, 수량: %.8f, 주문 ID: %d",
+			symbol, math.Abs(targetPosition.Quantity), orderResponse.OrderID))
+	}
 
 	// 6. 포지션 청산 확인
 	cleared := false
@@ -3871,10 +3519,6 @@ func (m *BinancePositionManager) ClosePosition(ctx context.Context, symbol strin
 		time.Sleep(m.retryDelay)
 	}
 
-	if !cleared {
-		return nil, position.NewPositionError(symbol, "confirm_close", fmt.Errorf("최대 재시도 횟수 초과: 포지션이 청산되지 않음"))
-	}
-
 	// 7. 결과 생성
 	realizedPnL := targetPosition.UnrealizedPnL
 
@@ -3888,6 +3532,23 @@ func (m *BinancePositionManager) ClosePosition(ctx context.Context, symbol strin
 			"close": orderResponse.OrderID,
 		},
 		RealizedPnL: &realizedPnL,
+	}
+
+	if cleared {
+		if m.notifier != nil {
+			// 수익/손실 정보 포함
+			pnlText := "손실"
+			if realizedPnL > 0 {
+				pnlText = "수익"
+			}
+			m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션 청산 완료: %.2f USDT %s",
+				symbol, math.Abs(realizedPnL), pnlText))
+		}
+	} else {
+		// 청산 확인 실패 시
+		if m.notifier != nil {
+			m.notifier.SendError(fmt.Errorf("❌ %s 포지션 청산 확인 실패", symbol))
+		}
 	}
 
 	return result, nil
@@ -3966,14 +3627,13 @@ import (
 	"context"
 
 	"github.com/assist-by/phoenix/internal/domain"
-	"github.com/assist-by/phoenix/internal/strategy"
 )
 
 // PositionRequest는 포지션 생성/관리 요청 정보를 담습니다
 type PositionRequest struct {
-	Signal     *strategy.Signal // 전략에서 생성된 시그널
-	Leverage   int              // 사용할 레버리지
-	RiskFactor float64          // 리스크 팩터 (계정 잔고의 몇 %를 리스크로 설정할지)
+	Signal     domain.SignalInterface // 시그널
+	Leverage   int                    // 사용할 레버리지
+	RiskFactor float64                // 리스크 팩터 (계정 잔고의 몇 %를 리스크로 설정할지)
 }
 
 // PositionResult는 포지션 생성/관리 결과 정보를 담습니다
@@ -4224,6 +3884,225 @@ func init() {
 }
 
 ```
+## internal/strategy/macdsarema/signal.go
+```go
+package macdsarema
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/assist-by/phoenix/internal/domain"
+	"github.com/assist-by/phoenix/internal/strategy"
+)
+
+// MACDSAREMASignal은 MACD+SAR+EMA 전략에 특화된 시그널 구현체입니다
+type MACDSAREMASignal struct {
+	domain.BaseSignal // 기본 시그널 필드와 메서드 상속
+
+	// MACD+SAR+EMA 전략 특화 필드
+	EMAValue    float64 // 200 EMA 값
+	EMAAbove    bool    // 가격이 EMA 위에 있는지 여부
+	MACDValue   float64 // MACD 라인 값
+	SignalValue float64 // 시그널 라인 값
+	Histogram   float64 // 히스토그램 값
+	MACDCross   int     // MACD 크로스 상태 (1: 상향돌파, -1: 하향돌파, 0: 크로스 없음)
+	SARValue    float64 // SAR 값
+	SARBelow    bool    // SAR이 캔들 아래에 있는지 여부
+}
+
+// NewMACDSAREMASignal은 기본 필드로 새 MACDSAREMASignal을 생성합니다
+func NewMACDSAREMASignal(
+	signalType domain.SignalType,
+	symbol string,
+	price float64,
+	timestamp time.Time,
+	stopLoss float64,
+	takeProfit float64,
+) *MACDSAREMASignal {
+	return &MACDSAREMASignal{
+		BaseSignal: domain.BaseSignal{
+			Type:       signalType,
+			Symbol:     symbol,
+			Price:      price,
+			Timestamp:  timestamp,
+			StopLoss:   stopLoss,
+			TakeProfit: takeProfit,
+		},
+	}
+}
+
+// CreateFromStrategySignal은 기존 strategy.Signal에서 MACDSAREMASignal을 생성합니다
+func CreateFromStrategySignal(s *domain.Signal) *MACDSAREMASignal {
+	if s == nil {
+		return nil
+	}
+
+	macdSignal := NewMACDSAREMASignal(
+		s.Type,
+		s.Symbol,
+		s.Price,
+		s.Timestamp,
+		s.StopLoss,
+		s.TakeProfit,
+	)
+
+	// 기존 Conditions 맵에서 필요한 데이터 추출
+	if s.Conditions.EMAValue != 0 {
+		macdSignal.EMAValue = s.Conditions.EMAValue
+	}
+	macdSignal.EMAAbove = s.Conditions.EMALong
+
+	if s.Conditions.MACDValue != 0 {
+		macdSignal.MACDValue = s.Conditions.MACDValue
+	}
+	if s.Conditions.SignalValue != 0 {
+		macdSignal.SignalValue = s.Conditions.SignalValue
+	}
+	if s.Conditions.SARValue != 0 {
+		macdSignal.SARValue = s.Conditions.SARValue
+	}
+
+	macdSignal.SARBelow = s.Conditions.SARLong
+	macdSignal.Histogram = macdSignal.MACDValue - macdSignal.SignalValue
+
+	// MACD 크로스 상태 결정
+	if s.Conditions.MACDLong {
+		macdSignal.MACDCross = 1 // 상향돌파
+	} else if s.Conditions.MACDShort {
+		macdSignal.MACDCross = -1 // 하향돌파
+	} else {
+		macdSignal.MACDCross = 0 // 크로스 없음
+	}
+
+	return macdSignal
+}
+
+// CreateFromConditions은 전략 분석 시 생성된 조건 맵에서 MACDSAREMASignal을 생성합니다
+func CreateFromConditions(
+	signalType domain.SignalType,
+	symbol string,
+	price float64,
+	timestamp time.Time,
+	stopLoss float64,
+	takeProfit float64,
+	conditions map[string]interface{},
+) *MACDSAREMASignal {
+	macdSignal := NewMACDSAREMASignal(
+		signalType,
+		symbol,
+		price,
+		timestamp,
+		stopLoss,
+		takeProfit,
+	)
+
+	// conditions 맵에서 값 추출
+	if val, ok := conditions["EMAValue"].(float64); ok {
+		macdSignal.EMAValue = val
+	}
+	if val, ok := conditions["EMALong"].(bool); ok {
+		macdSignal.EMAAbove = val
+	}
+	if val, ok := conditions["MACDValue"].(float64); ok {
+		macdSignal.MACDValue = val
+	}
+	if val, ok := conditions["SignalValue"].(float64); ok {
+		macdSignal.SignalValue = val
+	}
+	if val, ok := conditions["SARValue"].(float64); ok {
+		macdSignal.SARValue = val
+	}
+	if val, ok := conditions["SARLong"].(bool); ok {
+		macdSignal.SARBelow = val
+	}
+
+	// 히스토그램 계산
+	macdSignal.Histogram = macdSignal.MACDValue - macdSignal.SignalValue
+
+	// MACD 크로스 상태 결정
+	if val, ok := conditions["MACDLong"].(bool); ok && val {
+		macdSignal.MACDCross = 1 // 상향돌파
+	} else if val, ok := conditions["MACDShort"].(bool); ok && val {
+		macdSignal.MACDCross = -1 // 하향돌파
+	} else {
+		macdSignal.MACDCross = 0 // 크로스 없음
+	}
+
+	return macdSignal
+}
+
+// ToStrategySignal은 MACDSAREMASignal을 기존 strategy.Signal로 변환합니다
+// 이 메서드는 마이그레이션 기간 동안 호환성을 위해 사용됩니다
+func (s *MACDSAREMASignal) ToStrategySignal() *strategy.Signal {
+	conditions := map[string]interface{}{
+		"EMALong":     s.EMAAbove,
+		"EMAShort":    !s.EMAAbove,
+		"MACDLong":    s.MACDCross > 0,
+		"MACDShort":   s.MACDCross < 0,
+		"SARLong":     s.SARBelow,
+		"SARShort":    !s.SARBelow,
+		"EMAValue":    s.EMAValue,
+		"MACDValue":   s.MACDValue,
+		"SignalValue": s.SignalValue,
+		"SARValue":    s.SARValue,
+	}
+
+	return &strategy.Signal{
+		Type:       s.Type,
+		Symbol:     s.Symbol,
+		Price:      s.Price,
+		Timestamp:  s.Timestamp,
+		StopLoss:   s.StopLoss,
+		TakeProfit: s.TakeProfit,
+		Conditions: conditions,
+	}
+}
+
+// ToNotificationData는 MACD+SAR+EMA 전략에 특화된 알림 데이터를 반환합니다
+func (s *MACDSAREMASignal) ToNotificationData() map[string]interface{} {
+	data := s.BaseSignal.ToNotificationData() // 기본 필드 가져오기
+
+	// MACD+SAR+EMA 특화 필드 추가
+	data["EMA 값"] = fmt.Sprintf("%.5f", s.EMAValue)
+	data["EMA 상태"] = getAboveBelowText(s.EMAAbove)
+	data["MACD 값"] = fmt.Sprintf("%.5f", s.MACDValue)
+	data["시그널 값"] = fmt.Sprintf("%.5f", s.SignalValue)
+	data["히스토그램"] = fmt.Sprintf("%.5f", s.Histogram)
+	data["SAR 값"] = fmt.Sprintf("%.5f", s.SARValue)
+	data["SAR 상태"] = getSARText(s.SARBelow)
+	data["MACD 크로스"] = getMACDCrossText(s.MACDCross)
+
+	return data
+}
+
+// 표시용 헬퍼 함수들
+func getAboveBelowText(above bool) string {
+	if above {
+		return "가격이 EMA 위"
+	}
+	return "가격이 EMA 아래"
+}
+
+func getSARText(below bool) string {
+	if below {
+		return "SAR이 캔들 아래"
+	}
+	return "SAR이 캔들 위"
+}
+
+func getMACDCrossText(cross int) string {
+	switch cross {
+	case 1:
+		return "상향돌파"
+	case -1:
+		return "하향돌파"
+	default:
+		return "크로스 없음"
+	}
+}
+
+```
 ## internal/strategy/macdsarema/strategy.go
 ```go
 package macdsarema
@@ -4233,6 +4112,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/indicator"
@@ -4241,13 +4121,13 @@ import (
 
 // 심볼별 상태를 관리하기 위한 구조체
 type SymbolState struct {
-	PrevMACD       float64           // 이전 MACD 값
-	PrevSignal     float64           // 이전 Signal 값
-	PrevHistogram  float64           // 이전 히스토그램 값
-	LastSignal     *strategy.Signal  // 마지막 발생 시그널
-	PendingSignal  domain.SignalType // 대기중인 시그널 타입
-	WaitedCandles  int               // 대기한 캔들 수
-	MaxWaitCandles int               // 최대 대기 캔들 수
+	PrevMACD       float64                // 이전 MACD 값
+	PrevSignal     float64                // 이전 Signal 값
+	PrevHistogram  float64                // 이전 히스토그램 값
+	LastSignal     domain.SignalInterface // 마지막 발생 시그널
+	PendingSignal  domain.SignalType      // 대기중인 시그널 타입
+	WaitedCandles  int                    // 대기한 캔들 수
+	MaxWaitCandles int                    // 최대 대기 캔들 수
 }
 
 // MACDSAREMAStrategy는 MACD + SAR + EMA 전략을 구현합니다
@@ -4326,7 +4206,7 @@ func (s *MACDSAREMAStrategy) Initialize(ctx context.Context) error {
 }
 
 // Analyze는 주어진 캔들 데이터를 분석하여 매매 신호를 생성합니다
-func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles domain.CandleList) (*strategy.Signal, error) {
+func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles domain.CandleList) (domain.SignalInterface, error) {
 	// 데이터 검증
 	emaLength := s.emaIndicator.Period
 	if len(candles) < emaLength {
@@ -4396,27 +4276,26 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 	)
 
 	// 시그널 객체 초기화
-	signal := &strategy.Signal{
-		Type:      domain.NoSignal,
-		Symbol:    symbol,
-		Price:     currentPrice,
-		Timestamp: lastCandle.Time,
-		Conditions: map[string]interface{}{
-			"EMALong":     isAboveEMA,
-			"EMAShort":    !isAboveEMA,
-			"MACDLong":    macdCross == 1,
-			"MACDShort":   macdCross == -1,
-			"SARLong":     sarBelowCandle,
-			"SARShort":    !sarBelowCandle,
-			"EMAValue":    currentEMA,
-			"MACDValue":   currentMACD,
-			"SignalValue": currentSignal,
-			"SARValue":    currentSAR,
-		},
+	signalType := domain.NoSignal
+	var stopLoss, takeProfit float64
+
+	// 조건 맵 생성 (기존과 동일)
+	conditions := map[string]interface{}{
+		"EMALong":     isAboveEMA,
+		"EMAShort":    !isAboveEMA,
+		"MACDLong":    macdCross == 1,
+		"MACDShort":   macdCross == -1,
+		"SARLong":     sarBelowCandle,
+		"SARShort":    !sarBelowCandle,
+		"EMAValue":    currentEMA,
+		"MACDValue":   currentMACD,
+		"SignalValue": currentSignal,
+		"SARValue":    currentSAR,
 	}
+
 	// 1. 대기 상태 확인 및 업데이트
 	if state.PendingSignal != domain.NoSignal {
-		pendingSignal := s.processPendingState(state, symbol, signal, currentHistogram, sarBelowCandle, sarAboveCandle)
+		pendingSignal := s.processPendingState(state, symbol, conditions, currentPrice, currentHistogram, sarBelowCandle, sarAboveCandle, currentSAR)
 		if pendingSignal != nil {
 			// 상태 업데이트
 			state.PrevMACD = currentMACD
@@ -4434,9 +4313,9 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		currentHistogram >= s.minHistogram && // MACD 히스토그램이 최소값 이상
 		sarBelowCandle { // SAR이 현재 봉의 저가보다 낮음
 
-		signal.Type = domain.Long
-		signal.StopLoss = currentSAR                                        // SAR 기반 손절가
-		signal.TakeProfit = currentPrice + (currentPrice - signal.StopLoss) // 1:1 비율
+		signalType = domain.Long
+		stopLoss = currentSAR                                 // SAR 기반 손절가
+		takeProfit = currentPrice + (currentPrice - stopLoss) // 1:1 비율
 
 		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
 			symbol, currentPrice, currentEMA, currentSAR)
@@ -4448,16 +4327,16 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		-currentHistogram >= s.minHistogram && // 음수 히스토그램에 대한 조건
 		sarAboveCandle { // SAR이 현재 봉의 고가보다 높음
 
-		signal.Type = domain.Short
-		signal.StopLoss = currentSAR                                        // SAR 기반 손절가
-		signal.TakeProfit = currentPrice - (signal.StopLoss - currentPrice) // 1:1 비율
+		signalType = domain.Short
+		stopLoss = currentSAR                                 // SAR 기반 손절가
+		takeProfit = currentPrice - (stopLoss - currentPrice) // 1:1 비율
 
 		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
 			symbol, currentPrice, currentEMA, currentSAR)
 	}
 
 	// 3. 새로운 대기 상태 설정 (일반 시그널이 아닌 경우)
-	if signal.Type == domain.NoSignal {
+	if signalType == domain.NoSignal {
 		// MACD 상향돌파 + EMA 위 + SAR 캔들 아래가 아닌 경우 -> 롱 대기 상태
 		if isAboveEMA && macdCross == 1 && !sarBelowCandle && currentHistogram > 0 {
 			state.PendingSignal = domain.PendingLong
@@ -4478,11 +4357,36 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 	state.PrevSignal = currentSignal
 	state.PrevHistogram = currentHistogram
 
-	if signal.Type != domain.NoSignal {
-		state.LastSignal = signal
+	macdSignal := &MACDSAREMASignal{
+		BaseSignal: domain.NewBaseSignal(
+			signalType,
+			symbol,
+			currentPrice,
+			lastCandle.Time,
+			stopLoss,
+			takeProfit,
+		),
+		EMAValue:    currentEMA,
+		EMAAbove:    isAboveEMA,
+		MACDValue:   currentMACD,
+		SignalValue: currentSignal,
+		Histogram:   currentHistogram,
+		MACDCross:   macdCross,
+		SARValue:    currentSAR,
+		SARBelow:    sarBelowCandle,
 	}
 
-	return signal, nil
+	// 조건 정보 설정
+	for k, v := range conditions {
+		macdSignal.SetCondition(k, v)
+	}
+
+	// 시그널이 생성되었으면 상태에 저장
+	if signalType != domain.NoSignal {
+		state.LastSignal = macdSignal
+	}
+
+	return macdSignal, nil
 }
 
 // getSymbolState는 심볼별 상태를 가져옵니다
@@ -4524,7 +4428,16 @@ func (s *MACDSAREMAStrategy) checkMACDCross(currentMACD, currentSignal, prevMACD
 }
 
 // processPendingState는 대기 상태를 처리하고 시그널을 생성합니다
-func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol string, baseSignal *strategy.Signal, currentHistogram float64, sarBelowCandle bool, sarAboveCandle bool) *strategy.Signal {
+func (s *MACDSAREMAStrategy) processPendingState(
+	state *SymbolState,
+	symbol string,
+	conditions map[string]interface{},
+	currentPrice float64,
+	currentHistogram float64,
+	sarBelowCandle bool,
+	sarAboveCandle bool,
+	currentSAR float64,
+) domain.SignalInterface {
 	// 캔들 카운트 증가
 	state.WaitedCandles++
 
@@ -4535,13 +4448,9 @@ func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol stri
 		return nil
 	}
 
-	resultSignal := &strategy.Signal{
-		Type:       domain.NoSignal,
-		Symbol:     baseSignal.Symbol,
-		Price:      baseSignal.Price,
-		Timestamp:  baseSignal.Timestamp,
-		Conditions: baseSignal.Conditions,
-	}
+	var resultSignal domain.SignalInterface = nil
+	var stopLoss, takeProfit float64
+	var resultType domain.SignalType = domain.NoSignal
 
 	// Long 대기 상태 처리
 	if state.PendingSignal == domain.PendingLong {
@@ -4555,15 +4464,15 @@ func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol stri
 
 		// SAR가 캔들 아래로 이동하면 롱 시그널 생성
 		if sarBelowCandle {
-			resultSignal.Type = domain.Long
-			resultSignal.StopLoss = baseSignal.Conditions["SARValue"].(float64)
-			resultSignal.TakeProfit = baseSignal.Price + (baseSignal.Price - resultSignal.StopLoss)
+			resultType = domain.Long
+			stopLoss = currentSAR
+			takeProfit = currentPrice + (currentPrice - stopLoss)
 
 			log.Printf("[%s] Long 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
 				symbol, state.WaitedCandles)
 
 			s.resetPendingState(state)
-			return resultSignal
+			// return resultSignal
 		}
 	}
 
@@ -4579,19 +4488,58 @@ func (s *MACDSAREMAStrategy) processPendingState(state *SymbolState, symbol stri
 
 		// SAR이 캔들 위로 이동하면 숏 시그널 생성
 		if sarAboveCandle {
-			resultSignal.Type = domain.Short
-			resultSignal.StopLoss = baseSignal.Conditions["SARValue"].(float64)
-			resultSignal.TakeProfit = baseSignal.Price - (resultSignal.StopLoss - baseSignal.Price)
+			resultType = domain.Short
+			stopLoss = currentSAR
+			takeProfit = currentPrice - (stopLoss - currentPrice)
 
 			log.Printf("[%s] Short 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
 				symbol, state.WaitedCandles)
 
 			s.resetPendingState(state)
-			return resultSignal
+			// return resultSignal
 		}
 	}
 
-	return nil
+	// 최종 시그널 생성
+	if resultType != domain.NoSignal {
+		macdSignal := &MACDSAREMASignal{
+			BaseSignal: domain.NewBaseSignal(
+				resultType,
+				symbol,
+				currentPrice,
+				time.Now(), // or use a proper timestamp
+				stopLoss,
+				takeProfit,
+			),
+			// 특화 필드 설정
+			EMAValue:    conditions["EMAValue"].(float64),
+			EMAAbove:    conditions["EMALong"].(bool),
+			MACDValue:   conditions["MACDValue"].(float64),
+			SignalValue: conditions["SignalValue"].(float64),
+			SARValue:    conditions["SARValue"].(float64),
+			SARBelow:    conditions["SARLong"].(bool),
+			MACDCross:   getMACDCrossValue(conditions),
+			Histogram:   conditions["MACDValue"].(float64) - conditions["SignalValue"].(float64),
+		}
+
+		// 조건 정보 설정
+		for k, v := range conditions {
+			macdSignal.SetCondition(k, v)
+		}
+
+		resultSignal = macdSignal
+	}
+
+	return resultSignal
+}
+
+func getMACDCrossValue(conditions map[string]interface{}) int {
+	if conditions["MACDLong"].(bool) {
+		return 1 // 상향돌파
+	} else if conditions["MACDShort"].(bool) {
+		return -1 // 하향돌파
+	}
+	return 0 // 크로스 없음
 }
 
 // CalculateTPSL은 현재 SAR 값을 기반으로 TP/SL 가격을 계산합니다
@@ -4657,7 +4605,7 @@ type Strategy interface {
 	Initialize(ctx context.Context) error
 
 	// Analyze는 주어진 데이터를 분석하여 매매 신호를 생성합니다
-	Analyze(ctx context.Context, symbol string, candles domain.CandleList) (*Signal, error)
+	Analyze(ctx context.Context, symbol string, candles domain.CandleList) (domain.SignalInterface, error)
 
 	// GetName은 전략의 이름을 반환합니다
 	GetName() string
