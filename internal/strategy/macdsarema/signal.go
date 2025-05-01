@@ -146,7 +146,7 @@ func (s *MACDSAREMASignal) ToNotificationData() map[string]interface{} {
 	}
 
 	// 필드 배열을 데이터에 추가
-	data["필드"] = fields
+	data["field"] = fields
 
 	return data
 }

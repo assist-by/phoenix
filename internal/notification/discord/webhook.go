@@ -105,7 +105,7 @@ func (c *Client) SendSignal(s domain.SignalInterface) error {
 
 	// 전략별 필드들 추가
 	// 전략은 ToNotificationData에서 "필드" 키로 필드 목록을 제공할 수 있음
-	if fields, hasFields := notificationData["필드"].([]map[string]interface{}); hasFields {
+	if fields, hasFields := notificationData["field"].([]map[string]interface{}); hasFields {
 		for _, field := range fields {
 			name, _ := field["name"].(string)
 			value, _ := field["value"].(string)
@@ -186,11 +186,4 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	}
 
 	return c.sendToWebhook(c.tradeWebhook, msg)
-}
-
-func getCheckMark(condition bool) string {
-	if condition {
-		return "✅"
-	}
-	return "❌"
 }
