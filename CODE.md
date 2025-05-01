@@ -7,6 +7,10 @@ phoenix/
     └── trader/
     │   └── main.go
 └── internal/
+    ├── backtest/
+        ├── engine.go
+        ├── indicators.go
+        └── types.go
     ├── config/
         └── config.go
     ├── domain/
@@ -100,6 +104,8 @@ func main() {
 	// 명령줄 플래그 정의
 	testLongFlag := flag.Bool("testlong", false, "롱 포지션 테스트 후 종료")
 	testShortFlag := flag.Bool("testshort", false, "숏 포지션 테스트 후 종료")
+
+	backtestFlag := flag.Bool("backtest", false, "백테스트 모드로 실행")
 
 	// 플래그 파싱
 	flag.Parse()
@@ -208,14 +214,16 @@ func main() {
 		}),
 	)
 
-	// // 시그널 감지기 생성
-	// detector := signal.NewDetector(signal.DetectorConfig{
-	// 	EMALength:      200,
-	// 	StopLossPct:    0.02,
-	// 	TakeProfitPct:  0.04,
-	// 	MinHistogram:   0.00005,
-	// 	MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
-	// })
+	// 백테스트 모드 처리
+	if *backtestFlag {
+		// 플래그가 설정되었으면 .env 설정보다 우선
+		symbol := cfg.Backtest.Symbol
+		days := cfg.Backtest.Days
+		interval := domain.TimeInterval(cfg.Backtest.Interval)
+
+		runBacktest(ctx, symbol, days, interval, discordClient, binanceClient, tradingStrategy)
+		return
+	}
 
 	// 테스트 모드 실행 (플래그 기반)
 	if *testLongFlag || *testShortFlag {
@@ -338,6 +346,230 @@ func main() {
 	log.Println("프로그램을 종료합니다.")
 }
 
+func runBacktest(
+	ctx context.Context,
+	symbol string,
+	days int,
+	interval domain.TimeInterval,
+	discordClient *discord.Client,
+	binanceClient *eBinance.Client,
+	strategy strategy.Strategy,
+) {
+	log.Printf("'%s' 심볼에 대해 %d일 동안의 백테스트를 %s 간격으로 시작합니다...", symbol, days, interval)
+
+	// 필요한 캔들 개수 계산 (일별 캔들 수 * 일수 + 여유분)
+	candlesPerDay := 24 * 60 / domain.TimeIntervalToDuration(interval).Minutes()
+	requiredCandles := int(candlesPerDay*float64(days)) + 200 // 지표 계산을 위한 여유분
+
+	// 데이터 로드
+	log.Printf("바이낸스에서 %d개의 캔들 데이터를 로드합니다...", requiredCandles)
+	candles, err := binanceClient.GetKlines(ctx, symbol, interval, requiredCandles)
+	if err != nil {
+		log.Fatalf("캔들 데이터 로드 실패: %v", err)
+	}
+	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
+
+	// 백테스트 엔진 초기화 및 실행 (다음 단계에서 구현)
+	log.Printf("백테스트 엔진을 초기화하는 중...")
+	// 여기에 백테스트 엔진 초기화 및 실행 코드 추가 예정
+
+	// 임시 결과 표시
+	log.Printf("백테스트가 완료되었습니다. 자세한 결과는 향후 구현 예정입니다.")
+
+	// 결과를 Discord로 알림 (옵션)
+	if discordClient != nil {
+		discordClient.SendInfo(fmt.Sprintf("✅ %s 심볼에 대한 백테스트가 완료되었습니다. 자세한 결과는 로그를 확인하세요.", symbol))
+	}
+}
+
+```
+## internal/backtest/engine.go
+```go
+package backtest
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/assist-by/phoenix/internal/domain"
+	"github.com/assist-by/phoenix/internal/strategy"
+)
+
+// Engine은 백테스트 실행을 담당하는 구조체입니다
+type Engine struct {
+	Symbol    string
+	Interval  domain.TimeInterval
+	Candles   domain.CandleList
+	Strategy  strategy.Strategy
+	StartTime time.Time
+	EndTime   time.Time
+	cache     *IndicatorCache
+}
+
+// NewEngine은 새로운 백테스트 엔진을 생성합니다
+func NewEngine(symbol string, interval domain.TimeInterval, candles domain.CandleList, strat strategy.Strategy) *Engine {
+	startTime := candles[0].OpenTime
+	endTime := candles[len(candles)-1].CloseTime
+
+	return &Engine{
+		Symbol:    symbol,
+		Interval:  interval,
+		Candles:   candles,
+		Strategy:  strat,
+		StartTime: startTime,
+		EndTime:   endTime,
+	}
+}
+
+// Run은 백테스트를 실행합니다
+func (e *Engine) Run(ctx context.Context) (*Result, error) {
+	log.Printf("백테스트 실행: %s (%s - %s)", e.Symbol,
+		e.StartTime.Format("2006-01-02"),
+		e.EndTime.Format("2006-01-02"))
+
+	// 지표 캐싱 - 2단계에서 구현 예정
+	e.cacheIndicators()
+
+	// 백테스트 결과 준비
+	result := &Result{
+		Symbol:    e.Symbol,
+		Interval:  e.Interval,
+		StartTime: e.StartTime,
+		EndTime:   e.EndTime,
+		Trades:    make([]Trade, 0),
+	}
+
+	// 여기에 백테스트 루프 로직 추가 예정 (3, 4단계에서 구현)
+
+	// 임시 결과 반환
+	return result, nil
+}
+
+// cacheIndicators는 백테스트에 필요한 모든 지표를 미리 계산합니다
+func (e *Engine) cacheIndicators() {
+	log.Printf("지표 계산 및 캐싱 중...")
+	// 2단계에서 구현 예정
+}
+
+```
+## internal/backtest/indicators.go
+```go
+package backtest
+
+import (
+	"fmt"
+	"log"
+	"sync"
+
+	"github.com/assist-by/phoenix/internal/indicator"
+)
+
+// IndicatorCache는 다양한 지표를 캐싱하는 범용 저장소입니다
+type IndicatorCache struct {
+	indicators map[string][]indicator.Result // 지표 이름을 키로 하는 결과 맵
+	mutex      sync.RWMutex                  // 동시성 제어
+}
+
+// NewIndicatorCache는 새로운 지표 캐시를 생성합니다
+func NewIndicatorCache() *IndicatorCache {
+	return &IndicatorCache{
+		indicators: make(map[string][]indicator.Result),
+	}
+}
+
+// CacheIndicator는 특정 지표를 계산하고 캐싱합니다
+func (cache *IndicatorCache) CacheIndicator(name string, ind indicator.Indicator, prices []indicator.PriceData) error {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+
+	log.Printf("지표 '%s' 계산 중...", name)
+	results, err := ind.Calculate(prices)
+	if err != nil {
+		return fmt.Errorf("지표 '%s' 계산 실패: %w", name, err)
+	}
+
+	cache.indicators[name] = results
+	log.Printf("지표 '%s' 계산 완료: %d개 결과", name, len(results))
+	return nil
+}
+
+// GetIndicator는 특정 이름과 인덱스의 지표 결과를 반환합니다
+func (cache *IndicatorCache) GetIndicator(name string, index int) (indicator.Result, error) {
+	cache.mutex.RLock()
+	defer cache.mutex.RUnlock()
+
+	results, exists := cache.indicators[name]
+	if !exists {
+		return nil, fmt.Errorf("캐시에 '%s' 지표가 없습니다", name)
+	}
+
+	if index < 0 || index >= len(results) {
+		return nil, fmt.Errorf("유효하지 않은 인덱스: %d", index)
+	}
+
+	return results[index], nil
+}
+
+// HasIndicator는 특정 지표가 캐시에 있는지 확인합니다
+func (cache *IndicatorCache) HasIndicator(name string) bool {
+	cache.mutex.RLock()
+	defer cache.mutex.RUnlock()
+
+	_, exists := cache.indicators[name]
+	return exists
+}
+
+// GetIndicators는 지표명 목록을 반환합니다
+func (cache *IndicatorCache) GetIndicators() []string {
+	cache.mutex.RLock()
+	defer cache.mutex.RUnlock()
+
+	var names []string
+	for name := range cache.indicators {
+		names = append(names, name)
+	}
+	return names
+}
+
+```
+## internal/backtest/types.go
+```go
+package backtest
+
+import (
+	"time"
+
+	"github.com/assist-by/phoenix/internal/domain"
+)
+
+// Result는 백테스트 결과를 저장하는 구조체입니다
+type Result struct {
+	TotalTrades      int                 // 총 거래 횟수
+	WinningTrades    int                 // 승리 거래 횟수
+	LosingTrades     int                 // 패배 거래 횟수
+	WinRate          float64             // 승률 (%)
+	CumulativeReturn float64             // 누적 수익률 (%)
+	AverageReturn    float64             // 평균 수익률 (%)
+	MaxDrawdown      float64             // 최대 낙폭 (%)
+	Trades           []Trade             // 개별 거래 기록
+	StartTime        time.Time           // 백테스트 시작 시간
+	EndTime          time.Time           // 백테스트 종료 시간
+	Symbol           string              // 테스트한 심볼
+	Interval         domain.TimeInterval // 테스트 간격
+}
+
+// Trade는 개별 거래 정보를 저장합니다
+type Trade struct {
+	EntryTime  time.Time           // 진입 시간
+	ExitTime   time.Time           // 종료 시간
+	EntryPrice float64             // 진입 가격
+	ExitPrice  float64             // 종료 가격
+	Side       domain.PositionSide // 포지션 방향
+	ProfitPct  float64             // 수익률 (%)
+	ExitReason string              // 종료 이유 (TP, SL, 신호 반전 등)
+}
+
 ```
 ## internal/config/config.go
 ```go
@@ -388,6 +620,13 @@ type Config struct {
 	// 거래 설정
 	Trading struct {
 		Leverage int `envconfig:"LEVERAGE" default:"5" validate:"min=1,max=100"`
+	}
+
+	// 백테스트 설정 추가
+	Backtest struct {
+		Symbol   string `envconfig:"BACKTEST_SYMBOL" default:"BTCUSDT"`
+		Days     int    `envconfig:"BACKTEST_DAYS" default:"30"`
+		Interval string `envconfig:"BACKTEST_INTERVAL" default:"15m"`
 	}
 }
 
@@ -2899,7 +3138,7 @@ func (c *Client) SendSignal(s domain.SignalInterface) error {
 
 	// 전략별 필드들 추가
 	// 전략은 ToNotificationData에서 "필드" 키로 필드 목록을 제공할 수 있음
-	if fields, hasFields := notificationData["필드"].([]map[string]interface{}); hasFields {
+	if fields, hasFields := notificationData["field"].([]map[string]interface{}); hasFields {
 		for _, field := range fields {
 			name, _ := field["name"].(string)
 			value, _ := field["value"].(string)
@@ -2980,13 +3219,6 @@ func (c *Client) SendTradeInfo(info notification.TradeInfo) error {
 	}
 
 	return c.sendToWebhook(c.tradeWebhook, msg)
-}
-
-func getCheckMark(condition bool) string {
-	if condition {
-		return "✅"
-	}
-	return "❌"
 }
 
 ```
@@ -4033,7 +4265,7 @@ func (s *MACDSAREMASignal) ToNotificationData() map[string]interface{} {
 	}
 
 	// 필드 배열을 데이터에 추가
-	data["필드"] = fields
+	data["field"] = fields
 
 	return data
 }

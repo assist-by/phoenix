@@ -46,6 +46,13 @@ type Config struct {
 	Trading struct {
 		Leverage int `envconfig:"LEVERAGE" default:"5" validate:"min=1,max=100"`
 	}
+
+	// 백테스트 설정 추가
+	Backtest struct {
+		Symbol   string `envconfig:"BACKTEST_SYMBOL" default:"BTCUSDT"`
+		Days     int    `envconfig:"BACKTEST_DAYS" default:"30"`
+		Interval string `envconfig:"BACKTEST_INTERVAL" default:"15m"`
+	}
 }
 
 // ValidateConfig는 설정이 유효한지 확인합니다.

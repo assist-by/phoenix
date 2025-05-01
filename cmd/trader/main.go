@@ -45,6 +45,8 @@ func main() {
 	testLongFlag := flag.Bool("testlong", false, "롱 포지션 테스트 후 종료")
 	testShortFlag := flag.Bool("testshort", false, "숏 포지션 테스트 후 종료")
 
+	backtestFlag := flag.Bool("backtest", false, "백테스트 모드로 실행")
+
 	// 플래그 파싱
 	flag.Parse()
 
@@ -152,14 +154,16 @@ func main() {
 		}),
 	)
 
-	// // 시그널 감지기 생성
-	// detector := signal.NewDetector(signal.DetectorConfig{
-	// 	EMALength:      200,
-	// 	StopLossPct:    0.02,
-	// 	TakeProfitPct:  0.04,
-	// 	MinHistogram:   0.00005,
-	// 	MaxWaitCandles: 3, // 대기 상태 최대 캔들 수 설정
-	// })
+	// 백테스트 모드 처리
+	if *backtestFlag {
+		// 플래그가 설정되었으면 .env 설정보다 우선
+		symbol := cfg.Backtest.Symbol
+		days := cfg.Backtest.Days
+		interval := domain.TimeInterval(cfg.Backtest.Interval)
+
+		runBacktest(ctx, symbol, days, interval, discordClient, binanceClient, tradingStrategy)
+		return
+	}
 
 	// 테스트 모드 실행 (플래그 기반)
 	if *testLongFlag || *testShortFlag {
@@ -280,4 +284,40 @@ func main() {
 	}
 
 	log.Println("프로그램을 종료합니다.")
+}
+
+func runBacktest(
+	ctx context.Context,
+	symbol string,
+	days int,
+	interval domain.TimeInterval,
+	discordClient *discord.Client,
+	binanceClient *eBinance.Client,
+	strategy strategy.Strategy,
+) {
+	log.Printf("'%s' 심볼에 대해 %d일 동안의 백테스트를 %s 간격으로 시작합니다...", symbol, days, interval)
+
+	// 필요한 캔들 개수 계산 (일별 캔들 수 * 일수 + 여유분)
+	candlesPerDay := 24 * 60 / domain.TimeIntervalToDuration(interval).Minutes()
+	requiredCandles := int(candlesPerDay*float64(days)) + 200 // 지표 계산을 위한 여유분
+
+	// 데이터 로드
+	log.Printf("바이낸스에서 %d개의 캔들 데이터를 로드합니다...", requiredCandles)
+	candles, err := binanceClient.GetKlines(ctx, symbol, interval, requiredCandles)
+	if err != nil {
+		log.Fatalf("캔들 데이터 로드 실패: %v", err)
+	}
+	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
+
+	// 백테스트 엔진 초기화 및 실행 (다음 단계에서 구현)
+	log.Printf("백테스트 엔진을 초기화하는 중...")
+	// 여기에 백테스트 엔진 초기화 및 실행 코드 추가 예정
+
+	// 임시 결과 표시
+	log.Printf("백테스트가 완료되었습니다. 자세한 결과는 향후 구현 예정입니다.")
+
+	// 결과를 Discord로 알림 (옵션)
+	if discordClient != nil {
+		discordClient.SendInfo(fmt.Sprintf("✅ %s 심볼에 대한 백테스트가 완료되었습니다. 자세한 결과는 로그를 확인하세요.", symbol))
+	}
 }
