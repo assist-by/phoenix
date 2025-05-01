@@ -3006,7 +3006,6 @@ const (
 // Notifier는 알림 전송 인터페이스를 정의합니다
 type Notifier interface {
 	// SendSignal은 트레이딩 시그널 알림을 전송합니다
-	// 기존: SendSignal(signal *strategy.Signal) error
 	SendSignal(signal domain.SignalInterface) error
 
 	// SendError는 에러 알림을 전송합니다
@@ -3893,10 +3892,8 @@ import (
 	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
-	"github.com/assist-by/phoenix/internal/strategy"
 )
 
-// MACDSAREMASignal은 MACD+SAR+EMA 전략에 특화된 시그널 구현체입니다
 type MACDSAREMASignal struct {
 	domain.BaseSignal // 기본 시그널 필드와 메서드 상속
 
@@ -3921,61 +3918,15 @@ func NewMACDSAREMASignal(
 	takeProfit float64,
 ) *MACDSAREMASignal {
 	return &MACDSAREMASignal{
-		BaseSignal: domain.BaseSignal{
-			Type:       signalType,
-			Symbol:     symbol,
-			Price:      price,
-			Timestamp:  timestamp,
-			StopLoss:   stopLoss,
-			TakeProfit: takeProfit,
-		},
+		BaseSignal: domain.NewBaseSignal(
+			signalType,
+			symbol,
+			price,
+			timestamp,
+			stopLoss,
+			takeProfit,
+		),
 	}
-}
-
-// CreateFromStrategySignal은 기존 strategy.Signal에서 MACDSAREMASignal을 생성합니다
-func CreateFromStrategySignal(s *domain.Signal) *MACDSAREMASignal {
-	if s == nil {
-		return nil
-	}
-
-	macdSignal := NewMACDSAREMASignal(
-		s.Type,
-		s.Symbol,
-		s.Price,
-		s.Timestamp,
-		s.StopLoss,
-		s.TakeProfit,
-	)
-
-	// 기존 Conditions 맵에서 필요한 데이터 추출
-	if s.Conditions.EMAValue != 0 {
-		macdSignal.EMAValue = s.Conditions.EMAValue
-	}
-	macdSignal.EMAAbove = s.Conditions.EMALong
-
-	if s.Conditions.MACDValue != 0 {
-		macdSignal.MACDValue = s.Conditions.MACDValue
-	}
-	if s.Conditions.SignalValue != 0 {
-		macdSignal.SignalValue = s.Conditions.SignalValue
-	}
-	if s.Conditions.SARValue != 0 {
-		macdSignal.SARValue = s.Conditions.SARValue
-	}
-
-	macdSignal.SARBelow = s.Conditions.SARLong
-	macdSignal.Histogram = macdSignal.MACDValue - macdSignal.SignalValue
-
-	// MACD 크로스 상태 결정
-	if s.Conditions.MACDLong {
-		macdSignal.MACDCross = 1 // 상향돌파
-	} else if s.Conditions.MACDShort {
-		macdSignal.MACDCross = -1 // 하향돌파
-	} else {
-		macdSignal.MACDCross = 0 // 크로스 없음
-	}
-
-	return macdSignal
 }
 
 // CreateFromConditions은 전략 분석 시 생성된 조건 맵에서 MACDSAREMASignal을 생성합니다
@@ -4030,33 +3981,6 @@ func CreateFromConditions(
 	}
 
 	return macdSignal
-}
-
-// ToStrategySignal은 MACDSAREMASignal을 기존 strategy.Signal로 변환합니다
-// 이 메서드는 마이그레이션 기간 동안 호환성을 위해 사용됩니다
-func (s *MACDSAREMASignal) ToStrategySignal() *strategy.Signal {
-	conditions := map[string]interface{}{
-		"EMALong":     s.EMAAbove,
-		"EMAShort":    !s.EMAAbove,
-		"MACDLong":    s.MACDCross > 0,
-		"MACDShort":   s.MACDCross < 0,
-		"SARLong":     s.SARBelow,
-		"SARShort":    !s.SARBelow,
-		"EMAValue":    s.EMAValue,
-		"MACDValue":   s.MACDValue,
-		"SignalValue": s.SignalValue,
-		"SARValue":    s.SARValue,
-	}
-
-	return &strategy.Signal{
-		Type:       s.Type,
-		Symbol:     s.Symbol,
-		Price:      s.Price,
-		Timestamp:  s.Timestamp,
-		StopLoss:   s.StopLoss,
-		TakeProfit: s.TakeProfit,
-		Conditions: conditions,
-	}
 }
 
 // ToNotificationData는 MACD+SAR+EMA 전략에 특화된 알림 데이터를 반환합니다
@@ -4582,22 +4506,9 @@ package strategy
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
 )
-
-// Signal은 전략에서 생성된 매매 신호를 표현합니다
-type Signal struct {
-	Type       domain.SignalType      // 시그널 유형 (Long, Short 등)
-	Symbol     string                 // 심볼 (예: BTCUSDT)
-	Price      float64                // 현재 가격
-	Timestamp  time.Time              // 시그널 생성 시간
-	Conditions map[string]interface{} // 시그널 발생 조건 상세 (유연한 구조)
-	StopLoss   float64                // 손절가
-	TakeProfit float64                // 익절가
-	Meta       map[string]interface{} // 기타 전략별 메타데이터
-}
 
 // Strategy는 트레이딩 전략의 인터페이스를 정의합니다
 type Strategy interface {

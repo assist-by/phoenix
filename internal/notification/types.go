@@ -12,7 +12,6 @@ const (
 // Notifier는 알림 전송 인터페이스를 정의합니다
 type Notifier interface {
 	// SendSignal은 트레이딩 시그널 알림을 전송합니다
-	// 기존: SendSignal(signal *strategy.Signal) error
 	SendSignal(signal domain.SignalInterface) error
 
 	// SendError는 에러 알림을 전송합니다

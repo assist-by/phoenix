@@ -3,22 +3,9 @@ package strategy
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
 )
-
-// Signal은 전략에서 생성된 매매 신호를 표현합니다
-type Signal struct {
-	Type       domain.SignalType      // 시그널 유형 (Long, Short 등)
-	Symbol     string                 // 심볼 (예: BTCUSDT)
-	Price      float64                // 현재 가격
-	Timestamp  time.Time              // 시그널 생성 시간
-	Conditions map[string]interface{} // 시그널 발생 조건 상세 (유연한 구조)
-	StopLoss   float64                // 손절가
-	TakeProfit float64                // 익절가
-	Meta       map[string]interface{} // 기타 전략별 메타데이터
-}
 
 // Strategy는 트레이딩 전략의 인터페이스를 정의합니다
 type Strategy interface {
