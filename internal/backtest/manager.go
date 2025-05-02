@@ -2,6 +2,8 @@ package backtest
 
 import (
 	"fmt"
+	"log"
+	"math"
 	"time"
 
 	"github.com/assist-by/phoenix/internal/config"
@@ -115,6 +117,28 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 		return fmt.Errorf("이미 청산된 포지션입니다")
 	}
 
+	// 청산가가 유효한지 확인 (0이나 음수인 경우 처리)
+	if closePrice <= 0 {
+		log.Printf("경고: 유효하지 않은 청산가 (%.2f), 현재 가격으로 대체합니다", closePrice)
+		// 유효한 마지막 가격으로 대체 (이전 함수에서 전달받아야 함)
+		return fmt.Errorf("유효하지 않은 청산가: %.2f", closePrice)
+	}
+
+	// 청산 시간이 진입 시간보다 이전이면 경고 로그
+	if closeTime.Before(position.EntryTime) {
+		log.Printf("경고: 청산 시간이 진입 시간보다 이전입니다 (포지션: %s, 진입: %s, 청산: %s)",
+			position.Symbol, position.EntryTime.Format("2006-01-02 15:04:05"),
+			closeTime.Format("2006-01-02 15:04:05"))
+		// 청산 시간을 진입 시간 이후로 조정
+		closeTime = position.EntryTime.Add(time.Minute)
+	}
+
+	// 특히 Signal Reversal 경우 로그 추가
+	if reason == SignalReversal {
+		log.Printf("Signal Reversal 청산: %s %s, 진입가: %.2f, 청산가: %.2f",
+			position.Symbol, string(position.Side), position.EntryPrice, closePrice)
+	}
+
 	// 청산가 조정 (슬리피지 적용)
 	if position.Side == domain.LongPosition {
 		closePrice *= (1 - m.SlippagePct/100)
@@ -145,13 +169,22 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	// 포지션 초기 가치 계산 (레버리지 적용 전)
 	initialValue := position.EntryPrice * position.Quantity
 
+	// PnL 퍼센트 계산 전에 초기 가치가 0인지 체크 (0으로 나누기 방지)
+	var pnlPercentage float64
+	if initialValue > 0 {
+		pnlPercentage = (pnl / initialValue) * 100
+	} else {
+		pnlPercentage = 0 // 기본값 설정
+		log.Printf("경고: 포지션 초기 가치가 0 또는 음수입니다 (심볼: %s)", position.Symbol)
+	}
+
 	// 포지션 상태 업데이트
 	position.ClosePrice = closePrice
 	position.CloseTime = closeTime
 	position.Status = Closed
 	position.ExitReason = reason
 	position.PnL = pnl
-	position.PnLPercentage = (pnl / initialValue) * 100
+	position.PnLPercentage = pnlPercentage
 
 	// 계정 잔고 업데이트
 	m.Account.Balance += pnl
@@ -224,7 +257,11 @@ func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInte
 			closedPositions = append(closedPositions, position)
 		} else if signalReversal {
 			// 시그널 반전으로 청산 (현재 캔들 종가로 청산)
-			m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal)
+			if err := m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal); err != nil {
+				// 오류 처리 (예: 청산가가 유효하지 않은 경우)
+				log.Printf("시그널 반전으로 청산 실패 (%s): %v", symbol, err)
+				continue
+			}
 			closedPositions = append(closedPositions, position)
 		}
 	}
@@ -286,15 +323,24 @@ func (m *Manager) GetBacktestResult(startTime, endTime time.Time, symbol string,
 	winningTrades := 0
 	losingTrades := 0
 	totalProfitPct := 0.0
+	validTradeCount := 0
 
 	// 포지션 분석
 	for _, trade := range m.Account.ClosedTrades {
-		if trade.PnL > 0 {
-			winningTrades++
+		// NaN 값 검사 추가
+		if !math.IsNaN(trade.PnLPercentage) {
+			if trade.PnL > 0 {
+				winningTrades++
+			} else {
+				losingTrades++
+			}
+			totalProfitPct += trade.PnLPercentage
+			validTradeCount++
 		} else {
-			losingTrades++
+			// NaN인 경우 로그에 기록 (디버깅용)
+			log.Printf("경고: NaN 수익률이 발견됨 (심볼: %s, 포지션: %s, 청산이유: %d)",
+				trade.Symbol, string(trade.Side), trade.ExitReason)
 		}
-		totalProfitPct += trade.PnLPercentage
 	}
 
 	// 승률 계산
@@ -317,7 +363,7 @@ func (m *Manager) GetBacktestResult(startTime, endTime time.Time, symbol string,
 
 	// 결과 생성
 	return &Result{
-		TotalTrades:      totalTrades,
+		TotalTrades:      validTradeCount,
 		WinningTrades:    winningTrades,
 		LosingTrades:     losingTrades,
 		WinRate:          winRate,

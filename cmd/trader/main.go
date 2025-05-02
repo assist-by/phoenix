@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	osSignal "os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -366,6 +367,15 @@ func runBacktest(ctx context.Context, config *config.Config, discordClient *disc
 	}
 	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
 
+	// 캔들 데이터 시간순 정렬
+	sort.Slice(candles, func(i, j int) bool {
+		return candles[i].OpenTime.Before(candles[j].OpenTime)
+	})
+
+	log.Printf("정렬된 캔들 데이터 기간: %s ~ %s",
+		candles[0].OpenTime.Format("2006-01-02 15:04:05"),
+		candles[len(candles)-1].CloseTime.Format("2006-01-02 15:04:05"))
+
 	// 백테스트 엔진 초기화
 	log.Printf("백테스트 엔진을 초기화하는 중...")
 	engine := backtest.NewEngine(config, tradingStrategy, symbolInfo, candles, symbol, interval)
@@ -412,8 +422,23 @@ func printBacktestResult(result *backtest.Result) {
 	if len(result.Trades) > 0 {
 		fmt.Println("\n거래 요약:")
 		fmt.Println("--------------------------------")
-		fmt.Printf("%-20s %-12s %-10s %-10s %-10s\n",
-			"시간", "방향", "수익률", "청산이유", "보유기간")
+
+		// 각 열의 너비를 정의합니다
+		const (
+			timeWidth     = 20
+			sideWidth     = 12
+			profitWidth   = 12
+			reasonWidth   = 18
+			durationWidth = 15
+		)
+
+		// 열 제목 출력 (정확한 너비와 정렬로)
+		fmt.Printf("%-*s %-*s %*s %-*s %-*s\n",
+			timeWidth, "시간",
+			sideWidth, "방향",
+			profitWidth, "수익률",
+			reasonWidth, "청산이유",
+			durationWidth, "보유기간")
 
 		for i, trade := range result.Trades {
 			// 최대 20개 거래만 출력
@@ -426,12 +451,19 @@ func printBacktestResult(result *backtest.Result) {
 			hours := int(duration.Hours())
 			minutes := int(duration.Minutes()) % 60
 
-			fmt.Printf("%-20s %-12s %+.2f%% %-10s %d시간 %d분\n",
-				trade.EntryTime.Format("2006-01-02 15:04"),
-				string(trade.Side),
-				trade.ProfitPct,
-				trade.ExitReason,
-				hours, minutes)
+			// 청산이유가 비어있으면 "알 수 없음"으로 표시
+			exitReason := trade.ExitReason
+			if exitReason == "" {
+				exitReason = "알 수 없음"
+			}
+
+			// 각 열을 정확한 너비와 정렬로 출력
+			fmt.Printf("%-*s %-*s %*s %-*s %-*s\n",
+				timeWidth, trade.EntryTime.Format("2006-01-02 15:04"),
+				sideWidth, string(trade.Side),
+				profitWidth, fmt.Sprintf("%+.2f%%", trade.ProfitPct),
+				reasonWidth, exitReason,
+				durationWidth, fmt.Sprintf("%d시간 %d분", hours, minutes))
 		}
 		fmt.Println("--------------------------------")
 	}
