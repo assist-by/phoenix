@@ -8,29 +8,62 @@ import (
 
 // Result는 백테스트 결과를 저장하는 구조체입니다
 type Result struct {
-	TotalTrades      int                 // 총 거래 횟수
-	WinningTrades    int                 // 승리 거래 횟수
-	LosingTrades     int                 // 패배 거래 횟수
-	WinRate          float64             // 승률 (%)
-	CumulativeReturn float64             // 누적 수익률 (%)
-	AverageReturn    float64             // 평균 수익률 (%)
-	MaxDrawdown      float64             // 최대 낙폭 (%)
-	Trades           []Trade             // 개별 거래 기록
-	StartTime        time.Time           // 백테스트 시작 시간
-	EndTime          time.Time           // 백테스트 종료 시간
-	Symbol           string              // 테스트한 심볼
-	Interval         domain.TimeInterval // 테스트 간격
+	TotalTrades          int                        // 총 거래 횟수
+	WinningTrades        int                        // 승리 거래 횟수
+	LosingTrades         int                        // 패배 거래 횟수
+	WinRate              float64                    // 승률 (%)
+	CumulativeReturn     float64                    // 누적 수익률 (%)
+	AverageReturn        float64                    // 평균 수익률 (%)
+	MaxDrawdown          float64                    // 최대 낙폭 (%)
+	Trades               []Trade                    // 개별 거래 기록
+	StartTime            time.Time                  // 백테스트 시작 시간
+	EndTime              time.Time                  // 백테스트 종료 시간
+	Symbol               string                     // 테스트한 심볼
+	Interval             domain.TimeInterval        // 테스트 간격
+	ProfitFactor         float64                    // 총 이익 / 총 손실
+	MaxConsecutiveWins   int                        // 최대 연속 승리 횟수
+	MaxConsecutiveLosses int                        // 최대 연속 패배 횟수
+	AvgWinAmount         float64                    // 평균 승리 금액 (%)
+	AvgLossAmount        float64                    // 평균 패배 금액 (%)
+	AvgTradeTime         time.Duration              // 평균 거래 지속 시간
+	TimeBasedPerformance map[string]TimePerformance // 시간대별 성과
+	DayOfWeekPerformance map[string]TimePerformance // 요일별 성과
+	MonthlyReturns       map[string]float64         // 월별 수익률
+	EquityCurve          []EquityPoint              // 자산 곡선 데이터
+}
+
+// EquityPoint는 자산 곡선을 그리기 위한 시점별 자산 상태입니다
+type EquityPoint struct {
+	Timestamp time.Time // 시간
+	Equity    float64   // 자산
+	Drawdown  float64   // 현재 낙폭 (%)
+}
+
+// TimePerformance는 특정 시간대 또는 요일의 성과를 나타냅니다
+type TimePerformance struct {
+	TotalTrades      int     // 총 거래 횟수
+	WinningTrades    int     // 승리 거래 횟수
+	LosingTrades     int     // 패배 거래 횟수
+	WinRate          float64 // 승률 (%)
+	AverageReturn    float64 // 평균 수익률 (%)
+	CumulativeReturn float64 // 누적 수익률 (%)
 }
 
 // Trade는 개별 거래 정보를 저장합니다
 type Trade struct {
-	EntryTime  time.Time           // 진입 시간
-	ExitTime   time.Time           // 종료 시간
-	EntryPrice float64             // 진입 가격
-	ExitPrice  float64             // 종료 가격
-	Side       domain.PositionSide // 포지션 방향
-	ProfitPct  float64             // 수익률 (%)
-	ExitReason string              // 종료 이유 (TP, SL, 신호 반전 등)
+	EntryTime       time.Time              // 진입 시간
+	ExitTime        time.Time              // 종료 시간
+	EntryPrice      float64                // 진입 가격
+	ExitPrice       float64                // 종료 가격
+	Side            domain.PositionSide    // 포지션 방향
+	ProfitPct       float64                // 수익률 (%)
+	ExitReason      string                 // 종료 이유 (TP, SL, 신호 반전 등)
+	HoldingPeriod   time.Duration          // 포지션 유지 시간
+	MaxFavorablePct float64                // 최대 유리한 움직임 비율 (%)
+	MaxAdversePct   float64                // 최대 불리한 움직임 비율 (%)
+	TimeOfDay       string                 // 진입 시간대 (오전/오후/저녁)
+	DayOfWeek       string                 // 진입 요일
+	EntryConditions map[string]interface{} // 진입 조건 상세
 }
 
 // PositionStatus는 포지션 상태를 정의합니다
@@ -54,31 +87,41 @@ const (
 
 // Position은 백테스트 중 포지션 정보를 나타냅니다
 type Position struct {
-	Symbol        string              // 심볼 (예: BTCUSDT)
-	Side          domain.PositionSide // 롱/숏 포지션
-	EntryPrice    float64             // 진입가
-	Quantity      float64             // 수량
-	EntryTime     time.Time           // 진입 시간
-	StopLoss      float64             // 손절가
-	TakeProfit    float64             // 익절가
-	ClosePrice    float64             // 청산가 (청산 시에만 설정)
-	CloseTime     time.Time           // 청산 시간 (청산 시에만 설정)
-	PnL           float64             // 손익 (청산 시에만 설정)
-	PnLPercentage float64             // 손익률 % (청산 시에만 설정)
-	Status        PositionStatus      // 포지션 상태
-	ExitReason    ExitReason          // 청산 이유
+	Symbol            string              // 심볼 (예: BTCUSDT)
+	Side              domain.PositionSide // 롱/숏 포지션
+	EntryPrice        float64             // 진입가
+	Quantity          float64             // 수량
+	EntryTime         time.Time           // 진입 시간
+	StopLoss          float64             // 손절가
+	TakeProfit        float64             // 익절가
+	ClosePrice        float64             // 청산가 (청산 시에만 설정)
+	CloseTime         time.Time           // 청산 시간 (청산 시에만 설정)
+	PnL               float64             // 손익 (청산 시에만 설정)
+	PnLPercentage     float64             // 손익률 % (청산 시에만 설정)
+	Status            PositionStatus      // 포지션 상태
+	ExitReason        ExitReason          // 청산 이유
+	MaxFavorablePrice float64             // 가장 유리했던 가격
+	MaxAdversePrice   float64             // 가장 불리했던 가격
+	PriceHistory      []PricePoint        // 포지션 유지 중 가격 이력
+}
+
+// PricePoint는 포지션 유지 중 특정 시점의 가격 정보입니다
+type PricePoint struct {
+	Timestamp time.Time // 시간
+	Price     float64   // 가격
 }
 
 // Account는 백테스트 계정 상태를 나타냅니다
 type Account struct {
-	InitialBalance float64     // 초기 잔고
-	Balance        float64     // 현재 잔고
-	Positions      []*Position // 열린 포지션
-	ClosedTrades   []*Position // 청산된 포지션 기록
-	Equity         float64     // 총 자산 (잔고 + 미실현 손익)
-	HighWaterMark  float64     // 최고 자산 기록 (MDD 계산용)
-	Drawdown       float64     // 현재 낙폭
-	MaxDrawdown    float64     // 최대 낙폭
+	InitialBalance float64       // 초기 잔고
+	Balance        float64       // 현재 잔고
+	Positions      []*Position   // 열린 포지션
+	ClosedTrades   []*Position   // 청산된 포지션 기록
+	Equity         float64       // 총 자산 (잔고 + 미실현 손익)
+	HighWaterMark  float64       // 최고 자산 기록 (MDD 계산용)
+	Drawdown       float64       // 현재 낙폭
+	MaxDrawdown    float64       // 최대 낙폭
+	EquityHistory  []EquityPoint // 자산 변화 이력
 }
 
 // TradingRules는 백테스트 트레이딩 규칙을 정의합니다
