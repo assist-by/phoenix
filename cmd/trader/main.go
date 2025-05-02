@@ -423,25 +423,41 @@ func printBacktestResult(result *backtest.Result) {
 		fmt.Println("\n거래 요약:")
 		fmt.Println("--------------------------------")
 
-		// 각 열의 너비를 정의합니다
-		const (
-			timeWidth     = 20
-			sideWidth     = 12
-			profitWidth   = 12
-			reasonWidth   = 18
-			durationWidth = 15
-		)
+		// 각 열의 적절한 패딩값 구하기
+		timeColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			return t.EntryTime.Format("2006-01-02 15:04")
+		}, "시간")
 
-		// 열 제목 출력 (정확한 너비와 정렬로)
-		fmt.Printf("%-*s %-*s %*s %-*s %-*s\n",
-			timeWidth, "시간",
-			sideWidth, "방향",
-			profitWidth, "수익률",
-			reasonWidth, "청산이유",
-			durationWidth, "보유기간")
+		sideColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			return string(t.Side)
+		}, "방향")
 
+		profitColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			return fmt.Sprintf("%+.2f%%", t.ProfitPct)
+		}, "수익률")
+
+		reasonColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			if t.ExitReason == "" {
+				return "알 수 없음"
+			}
+			return t.ExitReason
+		}, "청산이유")
+
+		durationColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			duration := t.ExitTime.Sub(t.EntryTime)
+			hours := int(duration.Hours())
+			minutes := int(duration.Minutes()) % 60
+			return fmt.Sprintf("%d시간 %d분", hours, minutes)
+		}, "보유기간")
+
+		// 헤더 출력
+		format := fmt.Sprintf("%%-%ds %%-%ds %%-%ds %%-%ds %%-%ds\n",
+			timeColWidth, sideColWidth, profitColWidth, reasonColWidth, durationColWidth)
+
+		fmt.Printf(format, "Time", "Side", "Profit", "Exit Reason", "Duration")
+
+		// 데이터 출력
 		for i, trade := range result.Trades {
-			// 최대 20개 거래만 출력
 			if i >= 20 {
 				fmt.Printf("... 외 %d개 거래\n", len(result.Trades)-20)
 				break
@@ -451,22 +467,35 @@ func printBacktestResult(result *backtest.Result) {
 			hours := int(duration.Hours())
 			minutes := int(duration.Minutes()) % 60
 
-			// 청산이유가 비어있으면 "알 수 없음"으로 표시
 			exitReason := trade.ExitReason
 			if exitReason == "" {
 				exitReason = "알 수 없음"
 			}
 
-			// 각 열을 정확한 너비와 정렬로 출력
-			fmt.Printf("%-*s %-*s %*s %-*s %-*s\n",
-				timeWidth, trade.EntryTime.Format("2006-01-02 15:04"),
-				sideWidth, string(trade.Side),
-				profitWidth, fmt.Sprintf("%+.2f%%", trade.ProfitPct),
-				reasonWidth, exitReason,
-				durationWidth, fmt.Sprintf("%d시간 %d분", hours, minutes))
+			fmt.Printf(format,
+				trade.EntryTime.Format("2006-01-02 15:04"),
+				string(trade.Side),
+				fmt.Sprintf("%+.2f%%", trade.ProfitPct),
+				exitReason,
+				fmt.Sprintf("%d시간 %d분", hours, minutes))
 		}
 		fmt.Println("--------------------------------")
 	}
+}
+
+// findMaxWidth는 지정된 함수를 사용하여 최대 너비를 찾습니다
+func findMaxWidth(trades []backtest.Trade, getField func(backtest.Trade) string, header string) int {
+	maxLen := len(header)
+
+	for _, trade := range trades {
+		fieldLen := len(getField(trade))
+		if fieldLen > maxLen {
+			maxLen = fieldLen
+		}
+	}
+
+	// 최소 패딩 추가
+	return maxLen + 10
 }
 
 // sendBacktestResultToDiscord는 백테스트 결과를 Discord로 전송합니다
