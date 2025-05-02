@@ -176,8 +176,100 @@ func (c *Client) getServerTime() int64 {
 	return time.Now().UnixMilli() + c.serverTimeOffset
 }
 
-// GetKlines는 캔들 데이터를 조회합니다
+// GetKlines는 캔들 데이터를 조회합니다 (대용량 데이터 처리 지원)
 func (c *Client) GetKlines(ctx context.Context, symbol string, interval domain.TimeInterval, limit int) (domain.CandleList, error) {
+	const maxLimit = 1000 // 바이낸스 API 최대 제한
+
+	// 요청 캔들 수가 최대 제한보다 적으면 단일 요청
+	if limit <= maxLimit {
+		return c.getKlinesSimple(ctx, symbol, interval, limit)
+	}
+
+	// 대용량 데이터는 여러 번 나눠서 요청
+	var allCandles domain.CandleList
+	remainingCandles := limit
+	var endTime int64 = 0 // 첫 요청은 현재 시간부터
+
+	for remainingCandles > 0 {
+		fetchLimit := min(remainingCandles, maxLimit)
+		params := url.Values{}
+		params.Add("symbol", symbol)
+		params.Add("interval", string(interval))
+		params.Add("limit", strconv.Itoa(fetchLimit))
+
+		// endTime 파라미터 추가 (두 번째 요청부터)
+		if endTime > 0 {
+			params.Add("endTime", strconv.FormatInt(endTime, 10))
+		}
+
+		resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/klines", params, false)
+		if err != nil {
+			return nil, err
+		}
+
+		var rawCandles [][]interface{}
+		if err := json.Unmarshal(resp, &rawCandles); err != nil {
+			return nil, fmt.Errorf("캔들 데이터 파싱 실패: %w", err)
+		}
+
+		if len(rawCandles) == 0 {
+			break // 더 이상 데이터가 없음
+		}
+
+		// 캔들 변환 및 추가
+		candles := make(domain.CandleList, len(rawCandles))
+		for i, raw := range rawCandles {
+			openTime := int64(raw[0].(float64))
+			closeTime := int64(raw[6].(float64))
+
+			// 다음 요청의 endTime 설정 (가장 오래된 캔들의 시작 시간 - 1ms)
+			if i == len(rawCandles)-1 {
+				endTime = openTime - 1
+			}
+
+			// 가격 문자열 변환
+			open, _ := strconv.ParseFloat(raw[1].(string), 64)
+			high, _ := strconv.ParseFloat(raw[2].(string), 64)
+			low, _ := strconv.ParseFloat(raw[3].(string), 64)
+			close, _ := strconv.ParseFloat(raw[4].(string), 64)
+			volume, _ := strconv.ParseFloat(raw[5].(string), 64)
+
+			candles[i] = domain.Candle{
+				OpenTime:  time.Unix(openTime/1000, 0),
+				CloseTime: time.Unix(closeTime/1000, 0),
+				Open:      open,
+				High:      high,
+				Low:       low,
+				Close:     close,
+				Volume:    volume,
+				Symbol:    symbol,
+				Interval:  interval,
+			}
+		}
+
+		// 결과 병합
+		allCandles = append(candles, allCandles...)
+		remainingCandles -= len(rawCandles)
+
+		// 받은 캔들 수가 요청한 것보다 적으면 더 이상 데이터가 없는 것
+		if len(rawCandles) < fetchLimit {
+			break
+		}
+
+		// API 속도 제한 방지를 위한 짧은 지연
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 요청한 개수만큼 반환 (초과분 제거)
+	if len(allCandles) > limit {
+		return allCandles[:limit], nil
+	}
+
+	return allCandles, nil
+}
+
+// getKlinesSimple은 단일 요청으로 캔들 데이터를 조회합니다 (기존 로직)
+func (c *Client) getKlinesSimple(ctx context.Context, symbol string, interval domain.TimeInterval, limit int) (domain.CandleList, error) {
 	params := url.Values{}
 	params.Add("symbol", symbol)
 	params.Add("interval", string(interval))
