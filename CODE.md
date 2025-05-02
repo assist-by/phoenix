@@ -10,6 +10,7 @@ phoenix/
     ├── backtest/
         ├── engine.go
         ├── indicators.go
+        ├── manager.go
         └── types.go
     ├── config/
         └── config.go
@@ -70,6 +71,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/assist-by/phoenix/internal/backtest"
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
 	eBinance "github.com/assist-by/phoenix/internal/exchange/binance"
@@ -216,12 +218,7 @@ func main() {
 
 	// 백테스트 모드 처리
 	if *backtestFlag {
-		// 플래그가 설정되었으면 .env 설정보다 우선
-		symbol := cfg.Backtest.Symbol
-		days := cfg.Backtest.Days
-		interval := domain.TimeInterval(cfg.Backtest.Interval)
-
-		runBacktest(ctx, symbol, days, interval, discordClient, binanceClient, tradingStrategy)
+		runBacktest(ctx, cfg, discordClient, binanceClient, strategyRegistry)
 		return
 	}
 
@@ -346,16 +343,72 @@ func main() {
 	log.Println("프로그램을 종료합니다.")
 }
 
-func runBacktest(
-	ctx context.Context,
-	symbol string,
-	days int,
-	interval domain.TimeInterval,
-	discordClient *discord.Client,
-	binanceClient *eBinance.Client,
-	strategy strategy.Strategy,
-) {
-	log.Printf("'%s' 심볼에 대해 %d일 동안의 백테스트를 %s 간격으로 시작합니다...", symbol, days, interval)
+func runBacktest(ctx context.Context, config *config.Config, discordClient *discord.Client, binanceClient *eBinance.Client, strategyRegistry *strategy.Registry) {
+	// 백테스트 설정 로깅
+	log.Printf("백테스트 시작: 전략=%s, 심볼=%s, 기간=%d일, 간격=%s",
+		config.Backtest.Strategy,
+		config.Backtest.Symbol,
+		config.Backtest.Days,
+		config.Backtest.Interval,
+	)
+
+	// 지정된 전략이 등록되어 있는지 확인
+	availableStrategies := strategyRegistry.ListStrategies()
+	strategyFound := false
+	for _, s := range availableStrategies {
+		if s == config.Backtest.Strategy {
+			strategyFound = true
+			break
+		}
+	}
+
+	if !strategyFound {
+		errMsg := fmt.Sprintf("지정된 전략 '%s'을(를) 찾을 수 없습니다. 사용 가능한 전략: %v",
+			config.Backtest.Strategy, availableStrategies)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
+	}
+
+	// 전략 생성
+	strategyConfig := map[string]interface{}{
+		"emaLength":      200, // 기본값, 나중에 환경변수로 확장 가능
+		"stopLossPct":    0.02,
+		"takeProfitPct":  0.04,
+		"minHistogram":   0.00005,
+		"maxWaitCandles": 3,
+	}
+
+	tradingStrategy, err := strategyRegistry.Create(config.Backtest.Strategy, strategyConfig)
+	if err != nil {
+		errMsg := fmt.Sprintf("전략 생성 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
+	}
+
+	// 전략 초기화
+	tradingStrategy.Initialize(ctx)
+
+	// 심볼 정보 조회
+	symbol := config.Backtest.Symbol
+	symbolInfo, err := binanceClient.GetSymbolInfo(ctx, symbol)
+	if err != nil {
+		errMsg := fmt.Sprintf("심볼 정보 조회 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
+	}
+
+	// 캔들 데이터 로드
+	days := config.Backtest.Days
+	interval := domain.TimeInterval(config.Backtest.Interval)
 
 	// 필요한 캔들 개수 계산 (일별 캔들 수 * 일수 + 여유분)
 	candlesPerDay := 24 * 60 / domain.TimeIntervalToDuration(interval).Minutes()
@@ -365,21 +418,107 @@ func runBacktest(
 	log.Printf("바이낸스에서 %d개의 캔들 데이터를 로드합니다...", requiredCandles)
 	candles, err := binanceClient.GetKlines(ctx, symbol, interval, requiredCandles)
 	if err != nil {
-		log.Fatalf("캔들 데이터 로드 실패: %v", err)
+		errMsg := fmt.Sprintf("캔들 데이터 로드 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
 	}
 	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
 
-	// 백테스트 엔진 초기화 및 실행 (다음 단계에서 구현)
+	// 백테스트 엔진 초기화
 	log.Printf("백테스트 엔진을 초기화하는 중...")
-	// 여기에 백테스트 엔진 초기화 및 실행 코드 추가 예정
+	engine := backtest.NewEngine(config, tradingStrategy, symbolInfo, candles, symbol, interval)
 
-	// 임시 결과 표시
-	log.Printf("백테스트가 완료되었습니다. 자세한 결과는 향후 구현 예정입니다.")
-
-	// 결과를 Discord로 알림 (옵션)
-	if discordClient != nil {
-		discordClient.SendInfo(fmt.Sprintf("✅ %s 심볼에 대한 백테스트가 완료되었습니다. 자세한 결과는 로그를 확인하세요.", symbol))
+	// 백테스트 실행
+	log.Printf("백테스트 실행 중...")
+	result, err := engine.Run()
+	if err != nil {
+		errMsg := fmt.Sprintf("백테스트 실행 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
 	}
+
+	// 결과 출력
+	printBacktestResult(result)
+
+	// Discord 알림 (옵션)
+	if discordClient != nil {
+		sendBacktestResultToDiscord(discordClient, result, symbol, interval)
+	}
+}
+
+// printBacktestResult는 백테스트 결과를 콘솔에 출력합니다
+func printBacktestResult(result *backtest.Result) {
+	fmt.Println("\n--------------------------------")
+	fmt.Println("        백테스트 결과")
+	fmt.Println("--------------------------------")
+	fmt.Printf("심볼: %s, 간격: %s\n", result.Symbol, result.Interval)
+	fmt.Printf("기간: %s ~ %s\n",
+		result.StartTime.Format("2006-01-02 15:04:05"),
+		result.EndTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("총 거래 횟수: %d\n", result.TotalTrades)
+	fmt.Printf("승률: %.2f%% (%d승 %d패)\n",
+		result.WinRate, result.WinningTrades, result.LosingTrades)
+	fmt.Printf("평균 수익률: %.2f%%\n", result.AverageReturn)
+	fmt.Printf("누적 수익률: %.2f%%\n", result.CumulativeReturn)
+	fmt.Printf("최대 낙폭: %.2f%%\n", result.MaxDrawdown)
+	fmt.Println("--------------------------------")
+
+	// 거래 요약 (옵션)
+	if len(result.Trades) > 0 {
+		fmt.Println("\n거래 요약:")
+		fmt.Println("--------------------------------")
+		fmt.Printf("%-20s %-12s %-10s %-10s %-10s\n",
+			"시간", "방향", "수익률", "청산이유", "보유기간")
+
+		for i, trade := range result.Trades {
+			// 최대 20개 거래만 출력
+			if i >= 20 {
+				fmt.Printf("... 외 %d개 거래\n", len(result.Trades)-20)
+				break
+			}
+
+			duration := trade.ExitTime.Sub(trade.EntryTime)
+			hours := int(duration.Hours())
+			minutes := int(duration.Minutes()) % 60
+
+			fmt.Printf("%-20s %-12s %+.2f%% %-10s %d시간 %d분\n",
+				trade.EntryTime.Format("2006-01-02 15:04"),
+				string(trade.Side),
+				trade.ProfitPct,
+				trade.ExitReason,
+				hours, minutes)
+		}
+		fmt.Println("--------------------------------")
+	}
+}
+
+// sendBacktestResultToDiscord는 백테스트 결과를 Discord로 전송합니다
+func sendBacktestResultToDiscord(client *discord.Client, result *backtest.Result, symbol string, interval domain.TimeInterval) {
+	message := fmt.Sprintf(
+		"## 백테스트 결과: %s (%s)\n"+
+			"**기간**: %s ~ %s\n"+
+			"**총 거래**: %d (승: %d, 패: %d)\n"+
+			"**승률**: %.2f%%\n"+
+			"**누적 수익률**: %.2f%%\n"+
+			"**최대 낙폭**: %.2f%%\n"+
+			"**평균 수익률**: %.2f%%",
+		symbol, interval,
+		result.StartTime.Format("2006-01-02"),
+		result.EndTime.Format("2006-01-02"),
+		result.TotalTrades, result.WinningTrades, result.LosingTrades,
+		result.WinRate,
+		result.CumulativeReturn,
+		result.MaxDrawdown,
+		result.AverageReturn,
+	)
+
+	client.SendInfo(message)
 }
 
 ```
@@ -389,67 +528,206 @@ package backtest
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"time"
 
+	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
+	"github.com/assist-by/phoenix/internal/indicator"
 	"github.com/assist-by/phoenix/internal/strategy"
 )
 
-// Engine은 백테스트 실행을 담당하는 구조체입니다
+// Engine은 백테스트 실행 엔진입니다
 type Engine struct {
-	Symbol    string
-	Interval  domain.TimeInterval
-	Candles   domain.CandleList
-	Strategy  strategy.Strategy
-	StartTime time.Time
-	EndTime   time.Time
-	cache     *IndicatorCache
+	Strategy       strategy.Strategy   // 테스트할 전략
+	Manager        *Manager            // 백테스트 포지션 관리자
+	SymbolInfo     *domain.SymbolInfo  // 심볼 정보
+	Candles        domain.CandleList   // 캔들 데이터
+	Config         *config.Config      // 백테스트 설정
+	IndicatorCache *IndicatorCache     // 지표 캐시
+	StartTime      time.Time           // 백테스트 시작 시간
+	EndTime        time.Time           // 백테스트 종료 시간
+	Symbol         string              // 테스트 심볼
+	Interval       domain.TimeInterval // 테스트 간격
+	WarmupPeriod   int                 // 웜업 기간 (캔들 수)
 }
 
 // NewEngine은 새로운 백테스트 엔진을 생성합니다
-func NewEngine(symbol string, interval domain.TimeInterval, candles domain.CandleList, strat strategy.Strategy) *Engine {
+func NewEngine(
+	cfg *config.Config,
+	strategy strategy.Strategy,
+	symbolInfo *domain.SymbolInfo,
+	candles domain.CandleList,
+	symbol string,
+	interval domain.TimeInterval,
+) *Engine {
+	// 백테스트 시작/종료 시간 결정
 	startTime := candles[0].OpenTime
 	endTime := candles[len(candles)-1].CloseTime
 
+	// 심볼 정보 맵 생성
+	symbolInfos := make(map[string]*domain.SymbolInfo)
+	symbolInfos[symbol] = symbolInfo
+
+	// 포지션 관리자 생성
+	manager := NewManager(cfg, symbolInfos)
+
+	// 지표 캐시 생성
+	cache := NewIndicatorCache()
+
+	// 웜업 기간 결정 (최소 200 캔들 또는 전략에 따라 조정)
+	warmupPeriod := 200
+	if len(candles) < warmupPeriod {
+		warmupPeriod = len(candles) / 4 // 데이터가 부족한 경우 25% 사용
+	}
+
 	return &Engine{
-		Symbol:    symbol,
-		Interval:  interval,
-		Candles:   candles,
-		Strategy:  strat,
-		StartTime: startTime,
-		EndTime:   endTime,
+		Strategy:       strategy,
+		Manager:        manager,
+		SymbolInfo:     symbolInfo,
+		Candles:        candles,
+		Config:         cfg,
+		IndicatorCache: cache,
+		StartTime:      startTime,
+		EndTime:        endTime,
+		Symbol:         symbol,
+		Interval:       interval,
+		WarmupPeriod:   warmupPeriod,
 	}
 }
 
 // Run은 백테스트를 실행합니다
-func (e *Engine) Run(ctx context.Context) (*Result, error) {
-	log.Printf("백테스트 실행: %s (%s - %s)", e.Symbol,
-		e.StartTime.Format("2006-01-02"),
-		e.EndTime.Format("2006-01-02"))
-
-	// 지표 캐싱 - 2단계에서 구현 예정
-	e.cacheIndicators()
-
-	// 백테스트 결과 준비
-	result := &Result{
-		Symbol:    e.Symbol,
-		Interval:  e.Interval,
-		StartTime: e.StartTime,
-		EndTime:   e.EndTime,
-		Trades:    make([]Trade, 0),
+func (e *Engine) Run() (*Result, error) {
+	// 데이터 검증
+	if len(e.Candles) < e.WarmupPeriod {
+		return nil, fmt.Errorf("충분한 캔들 데이터가 없습니다: 필요 %d, 현재 %d",
+			e.WarmupPeriod, len(e.Candles))
 	}
 
-	// 여기에 백테스트 루프 로직 추가 예정 (3, 4단계에서 구현)
+	// 1. 지표 사전 계산
+	if err := e.prepareIndicators(); err != nil {
+		return nil, fmt.Errorf("지표 계산 실패: %w", err)
+	}
 
-	// 임시 결과 반환
+	log.Printf("백테스트 시작: 심볼=%s, 간격=%s, 캔들 수=%d, 웜업 기간=%d",
+		e.Symbol, e.Interval, len(e.Candles), e.WarmupPeriod)
+
+	// 2. 순차적 캔들 처리
+	ctx := context.Background()
+	candleMap := make(map[string]domain.Candle)
+
+	for i := e.WarmupPeriod; i < len(e.Candles); i++ {
+		currentCandle := e.Candles[i]
+
+		// 현재 시점까지의 데이터로 서브셋 생성 (미래 정보 누수 방지)
+		subsetCandles := e.Candles[:i+1]
+
+		// 전략 분석 및 시그널 생성
+		signal, err := e.Strategy.Analyze(ctx, e.Symbol, subsetCandles)
+		if err != nil {
+			log.Printf("전략 분석 실패 (캔들 %d): %v", i, err)
+			continue
+		}
+
+		// 신호가 있는 경우 포지션 진입
+		if signal != nil && signal.GetType() != domain.NoSignal {
+			if _, err := e.Manager.OpenPosition(signal, currentCandle); err != nil {
+				log.Printf("포지션 진입 실패 (캔들 %d): %v", i, err)
+			} else {
+				log.Printf("포지션 진입: %s %s @ %.2f",
+					e.Symbol, signal.GetType().String(), signal.GetPrice())
+			}
+		}
+
+		// 기존 포지션 업데이트 (TP/SL 체크)
+		closedPositions := e.Manager.UpdatePositions(currentCandle, signal)
+
+		// 청산된 포지션 로깅
+		for _, pos := range closedPositions {
+			log.Printf("포지션 청산: %s %s, 수익: %.2f%%, 이유: %s",
+				pos.Symbol,
+				string(pos.Side),
+				pos.PnLPercentage,
+				getExitReasonString(pos.ExitReason))
+		}
+
+		// 계정 자산 업데이트
+		candleMap[e.Symbol] = currentCandle
+		e.Manager.UpdateEquity(candleMap)
+	}
+
+	// 3. 미청산 포지션 처리
+	e.closeAllPositions()
+
+	// 4. 결과 계산 및 반환
+	result := e.Manager.GetBacktestResult(e.StartTime, e.EndTime, e.Symbol, e.Interval)
+
+	log.Printf("백테스트 완료: 총 거래=%d, 승률=%.2f%%, 누적 수익률=%.2f%%, 최대 낙폭=%.2f%%",
+		result.TotalTrades,
+		result.WinRate,
+		result.CumulativeReturn,
+		result.MaxDrawdown)
+
 	return result, nil
 }
 
-// cacheIndicators는 백테스트에 필요한 모든 지표를 미리 계산합니다
-func (e *Engine) cacheIndicators() {
-	log.Printf("지표 계산 및 캐싱 중...")
-	// 2단계에서 구현 예정
+// prepareIndicators는 지표를 미리 계산하고 캐싱합니다
+func (e *Engine) prepareIndicators() error {
+	// 캔들 데이터를 지표 계산용 형식으로 변환
+	prices := indicator.ConvertCandlesToPriceData(e.Candles)
+
+	// 기본 지표 집합 가져오기
+	indicatorSpecs := GetDefaultIndicators()
+
+	// 지표 계산 및 캐싱
+	if err := e.IndicatorCache.CacheIndicators(indicatorSpecs, prices); err != nil {
+		return fmt.Errorf("지표 캐싱 실패: %w", err)
+	}
+
+	return nil
+}
+
+// closeAllPositions은 모든 열린 포지션을 마지막 가격으로 청산합니다
+func (e *Engine) closeAllPositions() {
+	if len(e.Candles) == 0 {
+		return
+	}
+
+	// 마지막 캔들 가져오기
+	lastCandle := e.Candles[len(e.Candles)-1]
+
+	// 모든 열린 포지션 가져오기 및 청산
+	positions := e.Manager.Account.Positions
+
+	// 복사본 생성 (청산 중 슬라이스 변경 방지)
+	positionsCopy := make([]*Position, len(positions))
+	copy(positionsCopy, positions)
+
+	for _, pos := range positionsCopy {
+		if err := e.Manager.ClosePosition(pos, lastCandle.Close, lastCandle.CloseTime, EndOfBacktest); err != nil {
+			log.Printf("백테스트 종료 시 포지션 청산 실패: %v", err)
+		} else {
+			log.Printf("백테스트 종료 포지션 청산: %s %s, 수익: %.2f%%",
+				pos.Symbol, string(pos.Side), pos.PnLPercentage)
+		}
+	}
+}
+
+// getExitReasonString은 청산 이유를 문자열로 변환합니다
+func getExitReasonString(reason ExitReason) string {
+	switch reason {
+	case StopLossHit:
+		return "손절(SL)"
+	case TakeProfitHit:
+		return "익절(TP)"
+	case SignalReversal:
+		return "신호 반전"
+	case EndOfBacktest:
+		return "백테스트 종료"
+	default:
+		return "알 수 없음"
+	}
 }
 
 ```
@@ -532,6 +810,511 @@ func (cache *IndicatorCache) GetIndicators() []string {
 	return names
 }
 
+// IndicatorSpec은 지표 명세를 나타냅니다
+type IndicatorSpec struct {
+	Type       string                 // 지표 유형 (EMA, MACD, SAR 등)
+	Parameters map[string]interface{} // 지표 파라미터
+}
+
+// CreateIndicator는 지표 명세에 따라 지표 인스턴스를 생성합니다
+func CreateIndicator(spec IndicatorSpec) (indicator.Indicator, error) {
+	switch spec.Type {
+	case "EMA":
+		period, ok := spec.Parameters["period"].(int)
+		if !ok {
+			return nil, fmt.Errorf("EMA에는 'period' 파라미터가 필요합니다")
+		}
+		return indicator.NewEMA(period), nil
+
+	case "MACD":
+		shortPeriod, shortOk := spec.Parameters["shortPeriod"].(int)
+		longPeriod, longOk := spec.Parameters["longPeriod"].(int)
+		signalPeriod, signalOk := spec.Parameters["signalPeriod"].(int)
+		if !shortOk || !longOk || !signalOk {
+			return nil, fmt.Errorf("MACD에는 'shortPeriod', 'longPeriod', 'signalPeriod' 파라미터가 필요합니다")
+		}
+		return indicator.NewMACD(shortPeriod, longPeriod, signalPeriod), nil
+
+	case "SAR":
+		accelInitial, initialOk := spec.Parameters["accelerationInitial"].(float64)
+		accelMax, maxOk := spec.Parameters["accelerationMax"].(float64)
+		if !initialOk || !maxOk {
+			// 기본값 사용
+			return indicator.NewDefaultSAR(), nil
+		}
+		return indicator.NewSAR(accelInitial, accelMax), nil
+
+	default:
+		return nil, fmt.Errorf("지원하지 않는 지표 유형: %s", spec.Type)
+	}
+}
+
+// CacheIndicators는 여러 지표를 한 번에 캐싱합니다
+func (cache *IndicatorCache) CacheIndicators(specs []IndicatorSpec, prices []indicator.PriceData) error {
+	for _, spec := range specs {
+		// 지표 이름 생성 (유형 + 파라미터)
+		name := spec.Type
+		switch spec.Type {
+		case "EMA":
+			if period, ok := spec.Parameters["period"].(int); ok {
+				name = fmt.Sprintf("%s(%d)", spec.Type, period)
+			}
+		case "MACD":
+			if short, shortOk := spec.Parameters["shortPeriod"].(int); shortOk {
+				if long, longOk := spec.Parameters["longPeriod"].(int); longOk {
+					if signal, signalOk := spec.Parameters["signalPeriod"].(int); signalOk {
+						name = fmt.Sprintf("%s(%d,%d,%d)", spec.Type, short, long, signal)
+					}
+				}
+			}
+		case "SAR":
+			if initial, initialOk := spec.Parameters["accelerationInitial"].(float64); initialOk {
+				if max, maxOk := spec.Parameters["accelerationMax"].(float64); maxOk {
+					name = fmt.Sprintf("%s(%.2f,%.2f)", spec.Type, initial, max)
+				}
+			}
+		}
+
+		// 이미 캐시에 있는지 확인
+		if cache.HasIndicator(name) {
+			log.Printf("지표 '%s'가 이미 캐시에 있습니다", name)
+			continue
+		}
+
+		// 지표 생성 및 캐싱
+		ind, err := CreateIndicator(spec)
+		if err != nil {
+			return fmt.Errorf("지표 생성 실패 '%s': %w", name, err)
+		}
+
+		if err := cache.CacheIndicator(name, ind, prices); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// GetDefaultIndicators는 MACD+SAR+EMA 전략에 필요한 기본 지표 명세를 반환합니다
+func GetDefaultIndicators() []IndicatorSpec {
+	return []IndicatorSpec{
+		{
+			Type: "EMA",
+			Parameters: map[string]interface{}{
+				"period": 200,
+			},
+		},
+		{
+			Type: "MACD",
+			Parameters: map[string]interface{}{
+				"shortPeriod":  12,
+				"longPeriod":   26,
+				"signalPeriod": 9,
+			},
+		},
+		{
+			Type: "SAR",
+			Parameters: map[string]interface{}{
+				"accelerationInitial": 0.02,
+				"accelerationMax":     0.2,
+			},
+		},
+	}
+}
+
+```
+## internal/backtest/manager.go
+```go
+package backtest
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/assist-by/phoenix/internal/config"
+	"github.com/assist-by/phoenix/internal/domain"
+)
+
+// Manager는 백테스트용 포지션 관리자입니다
+type Manager struct {
+	Account     *Account                      // 계정 정보
+	Leverage    int                           // 레버리지
+	SlippagePct float64                       // 슬리피지 비율 (%)
+	TakerFee    float64                       // Taker 수수료 (%)
+	MakerFee    float64                       // Maker 수수료 (%)
+	Rules       TradingRules                  // 트레이딩 규칙
+	SymbolInfos map[string]*domain.SymbolInfo // 심볼 정보
+}
+
+// NewManager는 새로운 백테스트 매니저를 생성합니다
+func NewManager(cfg *config.Config, symbolInfos map[string]*domain.SymbolInfo) *Manager {
+	return &Manager{
+		Account: &Account{
+			InitialBalance: cfg.Backtest.InitialBalance,
+			Balance:        cfg.Backtest.InitialBalance,
+			Positions:      make([]*Position, 0),
+			ClosedTrades:   make([]*Position, 0),
+			HighWaterMark:  cfg.Backtest.InitialBalance,
+		},
+		Leverage:    cfg.Backtest.Leverage,
+		SlippagePct: cfg.Backtest.SlippagePct,
+		TakerFee:    0.0004, // 0.04% 기본값
+		MakerFee:    0.0002, // 0.02% 기본값
+		Rules: TradingRules{
+			MaxPositions:    1,    // 기본값: 심볼당 1개 포지션
+			MaxRiskPerTrade: 2,    // 기본값: 거래당 2% 리스크
+			SlPriority:      true, // 기본값: SL 우선
+		},
+		SymbolInfos: symbolInfos,
+	}
+}
+
+// OpenPosition은 새 포지션을 생성합니다
+func (m *Manager) OpenPosition(signal domain.SignalInterface, candle domain.Candle) (*Position, error) {
+	symbol := signal.GetSymbol()
+	signalType := signal.GetType()
+
+	// 이미 열린 포지션이 있는지 확인
+	for _, pos := range m.Account.Positions {
+		if pos.Symbol == symbol {
+			return nil, fmt.Errorf("이미 %s 심볼에 열린 포지션이 있습니다", symbol)
+		}
+	}
+
+	// 포지션 사이드 결정
+	var side domain.PositionSide
+	if signalType == domain.Long || signalType == domain.PendingLong {
+		side = domain.LongPosition
+	} else {
+		side = domain.ShortPosition
+	}
+
+	// 진입가 결정 (슬리피지 적용)
+	entryPrice := signal.GetPrice()
+	if side == domain.LongPosition {
+		entryPrice *= (1 + m.SlippagePct/100)
+	} else {
+		entryPrice *= (1 - m.SlippagePct/100)
+	}
+
+	// 포지션 크기 계산
+	positionSize := m.calculatePositionSize(m.Account.Balance, m.Rules.MaxRiskPerTrade, entryPrice, signal.GetStopLoss())
+	quantity := positionSize / entryPrice
+
+	// 심볼 정보가 있다면 최소 단위에 맞게 조정
+	if info, exists := m.SymbolInfos[symbol]; exists {
+		quantity = domain.AdjustQuantity(quantity, info.StepSize, info.QuantityPrecision)
+	}
+
+	// 포지션 생성에 필요한 자금이 충분한지 확인
+	requiredMargin := (positionSize / float64(m.Leverage))
+	entryFee := positionSize * m.TakerFee
+
+	if m.Account.Balance < (requiredMargin + entryFee) {
+		return nil, fmt.Errorf("잔고 부족: 필요 %.2f, 보유 %.2f", requiredMargin+entryFee, m.Account.Balance)
+	}
+
+	// 수수료 차감
+	m.Account.Balance -= entryFee
+
+	// 새 포지션 생성
+	position := &Position{
+		Symbol:     symbol,
+		Side:       side,
+		EntryPrice: entryPrice,
+		Quantity:   quantity,
+		EntryTime:  candle.OpenTime,
+		StopLoss:   signal.GetStopLoss(),
+		TakeProfit: signal.GetTakeProfit(),
+		Status:     Open,
+		ExitReason: NoExit,
+	}
+
+	// 포지션 목록에 추가
+	m.Account.Positions = append(m.Account.Positions, position)
+
+	return position, nil
+}
+
+// ClosePosition은 특정 포지션을 청산합니다
+func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTime time.Time, reason ExitReason) error {
+	if position.Status == Closed {
+		return fmt.Errorf("이미 청산된 포지션입니다")
+	}
+
+	// 청산가 조정 (슬리피지 적용)
+	if position.Side == domain.LongPosition {
+		closePrice *= (1 - m.SlippagePct/100)
+	} else {
+		closePrice *= (1 + m.SlippagePct/100)
+	}
+
+	// 포지션 가치 계산
+	positionValue := position.Quantity * closePrice
+
+	// 수수료 계산
+	closeFee := positionValue * m.TakerFee
+
+	// PnL 계산
+	var pnl float64
+	if position.Side == domain.LongPosition {
+		pnl = (closePrice - position.EntryPrice) * position.Quantity
+	} else {
+		pnl = (position.EntryPrice - closePrice) * position.Quantity
+	}
+
+	// 수수료 차감
+	pnl -= closeFee
+
+	// 레버리지 적용 (선물)
+	pnl *= float64(m.Leverage)
+
+	// 포지션 초기 가치 계산 (레버리지 적용 전)
+	initialValue := position.EntryPrice * position.Quantity
+
+	// 포지션 상태 업데이트
+	position.ClosePrice = closePrice
+	position.CloseTime = closeTime
+	position.Status = Closed
+	position.ExitReason = reason
+	position.PnL = pnl
+	position.PnLPercentage = (pnl / initialValue) * 100
+
+	// 계정 잔고 업데이트
+	m.Account.Balance += pnl
+
+	// 계정 기록 업데이트
+	m.Account.ClosedTrades = append(m.Account.ClosedTrades, position)
+
+	// 포지션 목록에서 제거
+	for i, p := range m.Account.Positions {
+		if p == position {
+			m.Account.Positions = append(m.Account.Positions[:i], m.Account.Positions[i+1:]...)
+			break
+		}
+	}
+
+	return nil
+}
+
+// UpdatePositions은 새 캔들 데이터로 모든 포지션을 업데이트합니다
+func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInterface) []*Position {
+	symbol := candle.Symbol
+	closedPositions := make([]*Position, 0)
+
+	// 현재 열린 포지션 중 해당 심볼에 대한 포지션 확인
+	for _, position := range m.Account.Positions {
+		if position.Symbol != symbol {
+			continue
+		}
+
+		// 1. TP/SL 도달 여부 확인
+		tpHit := false
+		slHit := false
+
+		if position.Side == domain.LongPosition {
+			// 롱 포지션: 고가가 TP 이상이면 TP 도달, 저가가 SL 이하면 SL 도달
+			if candle.High >= position.TakeProfit {
+				tpHit = true
+			}
+			if candle.Low <= position.StopLoss {
+				slHit = true
+			}
+		} else {
+			// 숏 포지션: 저가가 TP 이하면 TP 도달, 고가가 SL 이상이면 SL 도달
+			if candle.Low <= position.TakeProfit {
+				tpHit = true
+			}
+			if candle.High >= position.StopLoss {
+				slHit = true
+			}
+		}
+
+		// 2. 시그널 반전 여부 확인
+		signalReversal := false
+		if signal != nil && signal.GetType() != domain.NoSignal {
+			if (position.Side == domain.LongPosition && signal.GetType() == domain.Short) ||
+				(position.Side == domain.ShortPosition && signal.GetType() == domain.Long) {
+				signalReversal = true
+			}
+		}
+
+		// 3. 청산 처리
+		// 동일 캔들에서 TP와 SL 모두 도달하면 SL 우선 처리 (Rules.SlPriority 설정에 따라)
+		if slHit && (m.Rules.SlPriority || !tpHit) {
+			// SL 청산 (저점 또는 고점이 아닌 SL 가격으로 청산)
+			m.ClosePosition(position, position.StopLoss, candle.CloseTime, StopLossHit)
+			closedPositions = append(closedPositions, position)
+		} else if tpHit {
+			// TP 청산 (TP 가격으로 청산)
+			m.ClosePosition(position, position.TakeProfit, candle.CloseTime, TakeProfitHit)
+			closedPositions = append(closedPositions, position)
+		} else if signalReversal {
+			// 시그널 반전으로 청산 (현재 캔들 종가로 청산)
+			m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal)
+			closedPositions = append(closedPositions, position)
+		}
+	}
+
+	return closedPositions
+}
+
+// UpdateEquity는 계정 자산을 업데이트합니다
+func (m *Manager) UpdateEquity(candles map[string]domain.Candle) {
+	// 총 자산 계산 (잔고 + 열린 포지션의 현재 가치)
+	equity := m.Account.Balance
+
+	// 모든 열린 포지션에 대해 미실현 손익 계산
+	for _, position := range m.Account.Positions {
+		// 해당 심볼의 최신 캔들 가져오기
+		candle, exists := candles[position.Symbol]
+		if !exists {
+			continue
+		}
+
+		// 포지션 현재 가치 계산
+		var unrealizedPnl float64
+		if position.Side == domain.LongPosition {
+			unrealizedPnl = (candle.Close - position.EntryPrice) * position.Quantity
+		} else {
+			unrealizedPnl = (position.EntryPrice - candle.Close) * position.Quantity
+		}
+
+		// 레버리지 적용
+		unrealizedPnl *= float64(m.Leverage)
+
+		// 총 자산에 추가
+		equity += unrealizedPnl
+	}
+
+	// 계정 자산 업데이트
+	m.Account.Equity = equity
+
+	// 최고 자산 갱신
+	if equity > m.Account.HighWaterMark {
+		m.Account.HighWaterMark = equity
+	}
+
+	// 현재 낙폭 계산
+	if m.Account.HighWaterMark > 0 {
+		currentDrawdown := (m.Account.HighWaterMark - equity) / m.Account.HighWaterMark * 100
+		m.Account.Drawdown = currentDrawdown
+
+		// 최대 낙폭 갱신
+		if currentDrawdown > m.Account.MaxDrawdown {
+			m.Account.MaxDrawdown = currentDrawdown
+		}
+	}
+}
+
+// GetBacktestResult는 백테스트 결과를 계산합니다
+func (m *Manager) GetBacktestResult(startTime, endTime time.Time, symbol string, interval domain.TimeInterval) *Result {
+	totalTrades := len(m.Account.ClosedTrades)
+	winningTrades := 0
+	losingTrades := 0
+	totalProfitPct := 0.0
+
+	// 포지션 분석
+	for _, trade := range m.Account.ClosedTrades {
+		if trade.PnL > 0 {
+			winningTrades++
+		} else {
+			losingTrades++
+		}
+		totalProfitPct += trade.PnLPercentage
+	}
+
+	// 승률 계산
+	var winRate float64
+	if totalTrades > 0 {
+		winRate = float64(winningTrades) / float64(totalTrades) * 100
+	}
+
+	// 평균 수익률 계산
+	var avgReturn float64
+	if totalTrades > 0 {
+		avgReturn = totalProfitPct / float64(totalTrades)
+	}
+
+	// 누적 수익률 계산
+	cumulativeReturn := 0.0
+	if m.Account.InitialBalance > 0 {
+		cumulativeReturn = (m.Account.Balance - m.Account.InitialBalance) / m.Account.InitialBalance * 100
+	}
+
+	// 결과 생성
+	return &Result{
+		TotalTrades:      totalTrades,
+		WinningTrades:    winningTrades,
+		LosingTrades:     losingTrades,
+		WinRate:          winRate,
+		CumulativeReturn: cumulativeReturn,
+		AverageReturn:    avgReturn,
+		MaxDrawdown:      m.Account.MaxDrawdown,
+		Trades:           m.convertTradesToResultTrades(),
+		StartTime:        startTime,
+		EndTime:          endTime,
+		Symbol:           symbol,
+		Interval:         interval,
+	}
+}
+
+// calculatePositionSize는 리스크 기반으로 포지션 크기를 계산합니다
+func (m *Manager) calculatePositionSize(balance float64, riskPercent float64, entryPrice, stopLoss float64) float64 {
+	// 해당 거래에 할당할 자금
+	riskAmount := balance * (riskPercent / 100)
+
+	// 손절가와 진입가의 차이 (%)
+	var priceDiffPct float64
+	if entryPrice > stopLoss { // 롱 포지션
+		priceDiffPct = (entryPrice - stopLoss) / entryPrice * 100
+	} else { // 숏 포지션
+		priceDiffPct = (stopLoss - entryPrice) / entryPrice * 100
+	}
+
+	// 레버리지 고려
+	priceDiffPct = priceDiffPct * float64(m.Leverage)
+
+	// 리스크 기반 포지션 크기
+	if priceDiffPct > 0 {
+		return (riskAmount / priceDiffPct) * 100
+	}
+
+	// 기본값: 잔고의 1%
+	return balance * 0.01
+}
+
+// convertTradesToResultTrades는 내부 포지션 기록을 결과용 Trade 구조체로 변환합니다
+func (m *Manager) convertTradesToResultTrades() []Trade {
+	trades := make([]Trade, len(m.Account.ClosedTrades))
+
+	for i, position := range m.Account.ClosedTrades {
+		exitReason := ""
+		switch position.ExitReason {
+		case StopLossHit:
+			exitReason = "SL"
+		case TakeProfitHit:
+			exitReason = "TP"
+		case SignalReversal:
+			exitReason = "Signal Reversal"
+		case EndOfBacktest:
+			exitReason = "End of Backtest"
+		}
+
+		trades[i] = Trade{
+			EntryTime:  position.EntryTime,
+			ExitTime:   position.CloseTime,
+			EntryPrice: position.EntryPrice,
+			ExitPrice:  position.ClosePrice,
+			Side:       position.Side,
+			ProfitPct:  position.PnLPercentage,
+			ExitReason: exitReason,
+		}
+	}
+
+	return trades
+}
+
 ```
 ## internal/backtest/types.go
 ```go
@@ -568,6 +1351,61 @@ type Trade struct {
 	Side       domain.PositionSide // 포지션 방향
 	ProfitPct  float64             // 수익률 (%)
 	ExitReason string              // 종료 이유 (TP, SL, 신호 반전 등)
+}
+
+// PositionStatus는 포지션 상태를 정의합니다
+type PositionStatus int
+
+const (
+	Open   PositionStatus = iota // 열린 포지션
+	Closed                       // 청산된 포지션
+)
+
+// ExitReason은 포지션 청산 이유를 정의합니다
+type ExitReason int
+
+const (
+	NoExit         ExitReason = iota // 청산되지 않음
+	StopLossHit                      // 손절
+	TakeProfitHit                    // 익절
+	SignalReversal                   // 반대 신호 발생
+	EndOfBacktest                    // 백테스트 종료
+)
+
+// Position은 백테스트 중 포지션 정보를 나타냅니다
+type Position struct {
+	Symbol        string              // 심볼 (예: BTCUSDT)
+	Side          domain.PositionSide // 롱/숏 포지션
+	EntryPrice    float64             // 진입가
+	Quantity      float64             // 수량
+	EntryTime     time.Time           // 진입 시간
+	StopLoss      float64             // 손절가
+	TakeProfit    float64             // 익절가
+	ClosePrice    float64             // 청산가 (청산 시에만 설정)
+	CloseTime     time.Time           // 청산 시간 (청산 시에만 설정)
+	PnL           float64             // 손익 (청산 시에만 설정)
+	PnLPercentage float64             // 손익률 % (청산 시에만 설정)
+	Status        PositionStatus      // 포지션 상태
+	ExitReason    ExitReason          // 청산 이유
+}
+
+// Account는 백테스트 계정 상태를 나타냅니다
+type Account struct {
+	InitialBalance float64     // 초기 잔고
+	Balance        float64     // 현재 잔고
+	Positions      []*Position // 열린 포지션
+	ClosedTrades   []*Position // 청산된 포지션 기록
+	Equity         float64     // 총 자산 (잔고 + 미실현 손익)
+	HighWaterMark  float64     // 최고 자산 기록 (MDD 계산용)
+	Drawdown       float64     // 현재 낙폭
+	MaxDrawdown    float64     // 최대 낙폭
+}
+
+// TradingRules는 백테스트 트레이딩 규칙을 정의합니다
+type TradingRules struct {
+	MaxPositions    int     // 동시 오픈 가능한 최대 포지션 수
+	MaxRiskPerTrade float64 // 거래당 최대 리스크 (%)
+	SlPriority      bool    // 동일 시점에 TP/SL 모두 조건 충족시 SL 우선 적용 여부
 }
 
 ```
@@ -624,9 +1462,15 @@ type Config struct {
 
 	// 백테스트 설정 추가
 	Backtest struct {
-		Symbol   string `envconfig:"BACKTEST_SYMBOL" default:"BTCUSDT"`
-		Days     int    `envconfig:"BACKTEST_DAYS" default:"30"`
-		Interval string `envconfig:"BACKTEST_INTERVAL" default:"15m"`
+		Strategy       string  `envconfig:"BACKTEST_STRATEGY" default:"MACD+SAR+EMA"`
+		Symbol         string  `envconfig:"BACKTEST_SYMBOL" default:"BTCUSDT"`
+		Days           int     `envconfig:"BACKTEST_DAYS" default:"30"`
+		Interval       string  `envconfig:"BACKTEST_INTERVAL" default:"15m"`
+		InitialBalance float64 `envconfig:"BACKTEST_INITIAL_BALANCE" default:"1000.0"` // 초기 잔고
+		Leverage       int     `envconfig:"BACKTEST_LEVERAGE" default:"5"`             // 레버리지
+		SlippagePct    float64 `envconfig:"BACKTEST_SLIPPAGE_PCT" default:"0.0"`       // 슬리피지 비율
+		SaveResults    bool    `envconfig:"BACKTEST_SAVE_RESULTS" default:"false"`     // 결과 저장 여부
+		ResultsPath    string  `envconfig:"BACKTEST_RESULTS_PATH" default:"./results"` // 결과 저장 경로
 	}
 }
 
