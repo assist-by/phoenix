@@ -49,9 +49,15 @@ type Config struct {
 
 	// 백테스트 설정 추가
 	Backtest struct {
-		Symbol   string `envconfig:"BACKTEST_SYMBOL" default:"BTCUSDT"`
-		Days     int    `envconfig:"BACKTEST_DAYS" default:"30"`
-		Interval string `envconfig:"BACKTEST_INTERVAL" default:"15m"`
+		Strategy       string  `envconfig:"BACKTEST_STRATEGY" default:"MACD+SAR+EMA"`
+		Symbol         string  `envconfig:"BACKTEST_SYMBOL" default:"BTCUSDT"`
+		Days           int     `envconfig:"BACKTEST_DAYS" default:"30"`
+		Interval       string  `envconfig:"BACKTEST_INTERVAL" default:"15m"`
+		InitialBalance float64 `envconfig:"BACKTEST_INITIAL_BALANCE" default:"1000.0"` // 초기 잔고
+		Leverage       int     `envconfig:"BACKTEST_LEVERAGE" default:"5"`             // 레버리지
+		SlippagePct    float64 `envconfig:"BACKTEST_SLIPPAGE_PCT" default:"0.0"`       // 슬리피지 비율
+		SaveResults    bool    `envconfig:"BACKTEST_SAVE_RESULTS" default:"false"`     // 결과 저장 여부
+		ResultsPath    string  `envconfig:"BACKTEST_RESULTS_PATH" default:"./results"` // 결과 저장 경로
 	}
 }
 

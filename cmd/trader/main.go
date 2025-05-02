@@ -156,12 +156,7 @@ func main() {
 
 	// 백테스트 모드 처리
 	if *backtestFlag {
-		// 플래그가 설정되었으면 .env 설정보다 우선
-		symbol := cfg.Backtest.Symbol
-		days := cfg.Backtest.Days
-		interval := domain.TimeInterval(cfg.Backtest.Interval)
-
-		runBacktest(ctx, symbol, days, interval, discordClient, binanceClient, tradingStrategy)
+		runBacktest(ctx, cfg, discordClient, binanceClient, strategyRegistry)
 		return
 	}
 
@@ -288,14 +283,65 @@ func main() {
 
 func runBacktest(
 	ctx context.Context,
-	symbol string,
-	days int,
-	interval domain.TimeInterval,
+	config *config.Config,
 	discordClient *discord.Client,
 	binanceClient *eBinance.Client,
-	strategy strategy.Strategy,
+	strategyRegistry *strategy.Registry,
 ) {
-	log.Printf("'%s' 심볼에 대해 %d일 동안의 백테스트를 %s 간격으로 시작합니다...", symbol, days, interval)
+	// 백테스트 설정 로깅
+	log.Printf("백테스트 시작: 전략=%s, 심볼=%s, 기간=%d일, 간격=%s",
+		config.Backtest.Strategy,
+		config.Backtest.Symbol,
+		config.Backtest.Days,
+		config.Backtest.Interval,
+	)
+
+	// 지정된 전략이 등록되어 있는지 확인
+	availableStrategies := strategyRegistry.ListStrategies()
+	strategyFound := false
+	for _, s := range availableStrategies {
+		if s == config.Backtest.Strategy {
+			strategyFound = true
+			break
+		}
+	}
+
+	if !strategyFound {
+		errMsg := fmt.Sprintf("지정된 전략 '%s'을(를) 찾을 수 없습니다. 사용 가능한 전략: %v",
+			config.Backtest.Strategy, availableStrategies)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
+	}
+
+	// 전략 생성
+	strategyConfig := map[string]interface{}{
+		"emaLength":      200, // 기본값, 나중에 환경변수로 확장 가능
+		"stopLossPct":    0.02,
+		"takeProfitPct":  0.04,
+		"minHistogram":   0.00005,
+		"maxWaitCandles": 3,
+	}
+
+	tradingStrategy, err := strategyRegistry.Create(config.Backtest.Strategy, strategyConfig)
+	if err != nil {
+		errMsg := fmt.Sprintf("전략 생성 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
+	}
+
+	// 전략 초기화
+	tradingStrategy.Initialize(ctx)
+
+	// 캔들 데이터 로드
+	symbol := config.Backtest.Symbol
+	days := config.Backtest.Days
+	interval := domain.TimeInterval(config.Backtest.Interval)
 
 	// 필요한 캔들 개수 계산 (일별 캔들 수 * 일수 + 여유분)
 	candlesPerDay := 24 * 60 / domain.TimeIntervalToDuration(interval).Minutes()
@@ -305,13 +351,18 @@ func runBacktest(
 	log.Printf("바이낸스에서 %d개의 캔들 데이터를 로드합니다...", requiredCandles)
 	candles, err := binanceClient.GetKlines(ctx, symbol, interval, requiredCandles)
 	if err != nil {
-		log.Fatalf("캔들 데이터 로드 실패: %v", err)
+		errMsg := fmt.Sprintf("캔들 데이터 로드 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
 	}
 	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
 
-	// 백테스트 엔진 초기화 및 실행 (다음 단계에서 구현)
+	// 백테스트 엔진 초기화 및 실행 (아직 미구현)
 	log.Printf("백테스트 엔진을 초기화하는 중...")
-	// 여기에 백테스트 엔진 초기화 및 실행 코드 추가 예정
+	// TODO: 백테스트 엔진 구현 후 이 부분 완성
 
 	// 임시 결과 표시
 	log.Printf("백테스트가 완료되었습니다. 자세한 결과는 향후 구현 예정입니다.")
