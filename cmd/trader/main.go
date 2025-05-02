@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/assist-by/phoenix/internal/backtest"
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
 	eBinance "github.com/assist-by/phoenix/internal/exchange/binance"
@@ -281,13 +282,7 @@ func main() {
 	log.Println("프로그램을 종료합니다.")
 }
 
-func runBacktest(
-	ctx context.Context,
-	config *config.Config,
-	discordClient *discord.Client,
-	binanceClient *eBinance.Client,
-	strategyRegistry *strategy.Registry,
-) {
+func runBacktest(ctx context.Context, config *config.Config, discordClient *discord.Client, binanceClient *eBinance.Client, strategyRegistry *strategy.Registry) {
 	// 백테스트 설정 로깅
 	log.Printf("백테스트 시작: 전략=%s, 심볼=%s, 기간=%d일, 간격=%s",
 		config.Backtest.Strategy,
@@ -338,8 +333,19 @@ func runBacktest(
 	// 전략 초기화
 	tradingStrategy.Initialize(ctx)
 
-	// 캔들 데이터 로드
+	// 심볼 정보 조회
 	symbol := config.Backtest.Symbol
+	symbolInfo, err := binanceClient.GetSymbolInfo(ctx, symbol)
+	if err != nil {
+		errMsg := fmt.Sprintf("심볼 정보 조회 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
+	}
+
+	// 캔들 데이터 로드
 	days := config.Backtest.Days
 	interval := domain.TimeInterval(config.Backtest.Interval)
 
@@ -360,15 +366,96 @@ func runBacktest(
 	}
 	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
 
-	// 백테스트 엔진 초기화 및 실행 (아직 미구현)
+	// 백테스트 엔진 초기화
 	log.Printf("백테스트 엔진을 초기화하는 중...")
-	// TODO: 백테스트 엔진 구현 후 이 부분 완성
+	engine := backtest.NewEngine(config, tradingStrategy, symbolInfo, candles, symbol, interval)
 
-	// 임시 결과 표시
-	log.Printf("백테스트가 완료되었습니다. 자세한 결과는 향후 구현 예정입니다.")
-
-	// 결과를 Discord로 알림 (옵션)
-	if discordClient != nil {
-		discordClient.SendInfo(fmt.Sprintf("✅ %s 심볼에 대한 백테스트가 완료되었습니다. 자세한 결과는 로그를 확인하세요.", symbol))
+	// 백테스트 실행
+	log.Printf("백테스트 실행 중...")
+	result, err := engine.Run()
+	if err != nil {
+		errMsg := fmt.Sprintf("백테스트 실행 실패: %v", err)
+		log.Println(errMsg)
+		if discordClient != nil {
+			discordClient.SendError(fmt.Errorf(errMsg))
+		}
+		return
 	}
+
+	// 결과 출력
+	printBacktestResult(result)
+
+	// Discord 알림 (옵션)
+	if discordClient != nil {
+		sendBacktestResultToDiscord(discordClient, result, symbol, interval)
+	}
+}
+
+// printBacktestResult는 백테스트 결과를 콘솔에 출력합니다
+func printBacktestResult(result *backtest.Result) {
+	fmt.Println("\n--------------------------------")
+	fmt.Println("        백테스트 결과")
+	fmt.Println("--------------------------------")
+	fmt.Printf("심볼: %s, 간격: %s\n", result.Symbol, result.Interval)
+	fmt.Printf("기간: %s ~ %s\n",
+		result.StartTime.Format("2006-01-02 15:04:05"),
+		result.EndTime.Format("2006-01-02 15:04:05"))
+	fmt.Printf("총 거래 횟수: %d\n", result.TotalTrades)
+	fmt.Printf("승률: %.2f%% (%d승 %d패)\n",
+		result.WinRate, result.WinningTrades, result.LosingTrades)
+	fmt.Printf("평균 수익률: %.2f%%\n", result.AverageReturn)
+	fmt.Printf("누적 수익률: %.2f%%\n", result.CumulativeReturn)
+	fmt.Printf("최대 낙폭: %.2f%%\n", result.MaxDrawdown)
+	fmt.Println("--------------------------------")
+
+	// 거래 요약 (옵션)
+	if len(result.Trades) > 0 {
+		fmt.Println("\n거래 요약:")
+		fmt.Println("--------------------------------")
+		fmt.Printf("%-20s %-12s %-10s %-10s %-10s\n",
+			"시간", "방향", "수익률", "청산이유", "보유기간")
+
+		for i, trade := range result.Trades {
+			// 최대 20개 거래만 출력
+			if i >= 20 {
+				fmt.Printf("... 외 %d개 거래\n", len(result.Trades)-20)
+				break
+			}
+
+			duration := trade.ExitTime.Sub(trade.EntryTime)
+			hours := int(duration.Hours())
+			minutes := int(duration.Minutes()) % 60
+
+			fmt.Printf("%-20s %-12s %+.2f%% %-10s %d시간 %d분\n",
+				trade.EntryTime.Format("2006-01-02 15:04"),
+				string(trade.Side),
+				trade.ProfitPct,
+				trade.ExitReason,
+				hours, minutes)
+		}
+		fmt.Println("--------------------------------")
+	}
+}
+
+// sendBacktestResultToDiscord는 백테스트 결과를 Discord로 전송합니다
+func sendBacktestResultToDiscord(client *discord.Client, result *backtest.Result, symbol string, interval domain.TimeInterval) {
+	message := fmt.Sprintf(
+		"## 백테스트 결과: %s (%s)\n"+
+			"**기간**: %s ~ %s\n"+
+			"**총 거래**: %d (승: %d, 패: %d)\n"+
+			"**승률**: %.2f%%\n"+
+			"**누적 수익률**: %.2f%%\n"+
+			"**최대 낙폭**: %.2f%%\n"+
+			"**평균 수익률**: %.2f%%",
+		symbol, interval,
+		result.StartTime.Format("2006-01-02"),
+		result.EndTime.Format("2006-01-02"),
+		result.TotalTrades, result.WinningTrades, result.LosingTrades,
+		result.WinRate,
+		result.CumulativeReturn,
+		result.MaxDrawdown,
+		result.AverageReturn,
+	)
+
+	client.SendInfo(message)
 }
