@@ -32,3 +32,58 @@ type Trade struct {
 	ProfitPct  float64             // 수익률 (%)
 	ExitReason string              // 종료 이유 (TP, SL, 신호 반전 등)
 }
+
+// PositionStatus는 포지션 상태를 정의합니다
+type PositionStatus int
+
+const (
+	Open   PositionStatus = iota // 열린 포지션
+	Closed                       // 청산된 포지션
+)
+
+// ExitReason은 포지션 청산 이유를 정의합니다
+type ExitReason int
+
+const (
+	NoExit         ExitReason = iota // 청산되지 않음
+	StopLossHit                      // 손절
+	TakeProfitHit                    // 익절
+	SignalReversal                   // 반대 신호 발생
+	EndOfBacktest                    // 백테스트 종료
+)
+
+// Position은 백테스트 중 포지션 정보를 나타냅니다
+type Position struct {
+	Symbol        string              // 심볼 (예: BTCUSDT)
+	Side          domain.PositionSide // 롱/숏 포지션
+	EntryPrice    float64             // 진입가
+	Quantity      float64             // 수량
+	EntryTime     time.Time           // 진입 시간
+	StopLoss      float64             // 손절가
+	TakeProfit    float64             // 익절가
+	ClosePrice    float64             // 청산가 (청산 시에만 설정)
+	CloseTime     time.Time           // 청산 시간 (청산 시에만 설정)
+	PnL           float64             // 손익 (청산 시에만 설정)
+	PnLPercentage float64             // 손익률 % (청산 시에만 설정)
+	Status        PositionStatus      // 포지션 상태
+	ExitReason    ExitReason          // 청산 이유
+}
+
+// Account는 백테스트 계정 상태를 나타냅니다
+type Account struct {
+	InitialBalance float64     // 초기 잔고
+	Balance        float64     // 현재 잔고
+	Positions      []*Position // 열린 포지션
+	ClosedTrades   []*Position // 청산된 포지션 기록
+	Equity         float64     // 총 자산 (잔고 + 미실현 손익)
+	HighWaterMark  float64     // 최고 자산 기록 (MDD 계산용)
+	Drawdown       float64     // 현재 낙폭
+	MaxDrawdown    float64     // 최대 낙폭
+}
+
+// TradingRules는 백테스트 트레이딩 규칙을 정의합니다
+type TradingRules struct {
+	MaxPositions    int     // 동시 오픈 가능한 최대 포지션 수
+	MaxRiskPerTrade float64 // 거래당 최대 리스크 (%)
+	SlPriority      bool    // 동일 시점에 TP/SL 모두 조건 충족시 SL 우선 적용 여부
+}
