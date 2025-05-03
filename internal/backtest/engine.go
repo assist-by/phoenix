@@ -110,8 +110,17 @@ func (e *Engine) Run() (*Result, error) {
 				log.Printf("포지션 진입 실패 (캔들 %d) (캔들시간: %s): %v", i, err,
 					currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 			} else {
-				log.Printf("포지션 진입: %s %s @ %.2f (캔들시간: %s)",
+				sign := 1.0
+				if signal.GetType() != domain.Long {
+					sign = -1.0
+				}
+
+				log.Printf("포지션 진입: %s %s @ %.2f, SL: %.2f (%.2f%%), TP: %.2f (%.2f%%) (캔들시간: %s)",
 					e.Symbol, signal.GetType().String(), signal.GetPrice(),
+					signal.GetStopLoss(),
+					(signal.GetStopLoss()-signal.GetPrice())/signal.GetPrice()*100*sign,
+					signal.GetTakeProfit(),
+					(signal.GetTakeProfit()-signal.GetPrice())/signal.GetPrice()*100*sign,
 					currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 			}
 		}
