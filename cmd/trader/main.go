@@ -495,7 +495,7 @@ func findMaxWidth(trades []backtest.Trade, getField func(backtest.Trade) string,
 	}
 
 	// 최소 패딩 추가
-	return maxLen + 10
+	return maxLen + 5
 }
 
 // sendBacktestResultToDiscord는 백테스트 결과를 Discord로 전송합니다

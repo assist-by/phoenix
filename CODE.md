@@ -68,6 +68,7 @@ import (
 	"log"
 	"os"
 	osSignal "os/signal"
+	"sort"
 	"syscall"
 	"time"
 
@@ -427,6 +428,15 @@ func runBacktest(ctx context.Context, config *config.Config, discordClient *disc
 	}
 	log.Printf("%d개의 캔들 데이터를 성공적으로 로드했습니다.", len(candles))
 
+	// 캔들 데이터 시간순 정렬
+	sort.Slice(candles, func(i, j int) bool {
+		return candles[i].OpenTime.Before(candles[j].OpenTime)
+	})
+
+	log.Printf("정렬된 캔들 데이터 기간: %s ~ %s",
+		candles[0].OpenTime.Format("2006-01-02 15:04:05"),
+		candles[len(candles)-1].CloseTime.Format("2006-01-02 15:04:05"))
+
 	// 백테스트 엔진 초기화
 	log.Printf("백테스트 엔진을 초기화하는 중...")
 	engine := backtest.NewEngine(config, tradingStrategy, symbolInfo, candles, symbol, interval)
@@ -473,11 +483,42 @@ func printBacktestResult(result *backtest.Result) {
 	if len(result.Trades) > 0 {
 		fmt.Println("\n거래 요약:")
 		fmt.Println("--------------------------------")
-		fmt.Printf("%-20s %-12s %-10s %-10s %-10s\n",
-			"시간", "방향", "수익률", "청산이유", "보유기간")
 
+		// 각 열의 적절한 패딩값 구하기
+		timeColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			return t.EntryTime.Format("2006-01-02 15:04")
+		}, "시간")
+
+		sideColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			return string(t.Side)
+		}, "방향")
+
+		profitColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			return fmt.Sprintf("%+.2f%%", t.ProfitPct)
+		}, "수익률")
+
+		reasonColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			if t.ExitReason == "" {
+				return "알 수 없음"
+			}
+			return t.ExitReason
+		}, "청산이유")
+
+		durationColWidth := findMaxWidth(result.Trades, func(t backtest.Trade) string {
+			duration := t.ExitTime.Sub(t.EntryTime)
+			hours := int(duration.Hours())
+			minutes := int(duration.Minutes()) % 60
+			return fmt.Sprintf("%d시간 %d분", hours, minutes)
+		}, "보유기간")
+
+		// 헤더 출력
+		format := fmt.Sprintf("%%-%ds %%-%ds %%-%ds %%-%ds %%-%ds\n",
+			timeColWidth, sideColWidth, profitColWidth, reasonColWidth, durationColWidth)
+
+		fmt.Printf(format, "Time", "Side", "Profit", "Exit Reason", "Duration")
+
+		// 데이터 출력
 		for i, trade := range result.Trades {
-			// 최대 20개 거래만 출력
 			if i >= 20 {
 				fmt.Printf("... 외 %d개 거래\n", len(result.Trades)-20)
 				break
@@ -487,15 +528,35 @@ func printBacktestResult(result *backtest.Result) {
 			hours := int(duration.Hours())
 			minutes := int(duration.Minutes()) % 60
 
-			fmt.Printf("%-20s %-12s %+.2f%% %-10s %d시간 %d분\n",
+			exitReason := trade.ExitReason
+			if exitReason == "" {
+				exitReason = "알 수 없음"
+			}
+
+			fmt.Printf(format,
 				trade.EntryTime.Format("2006-01-02 15:04"),
 				string(trade.Side),
-				trade.ProfitPct,
-				trade.ExitReason,
-				hours, minutes)
+				fmt.Sprintf("%+.2f%%", trade.ProfitPct),
+				exitReason,
+				fmt.Sprintf("%d시간 %d분", hours, minutes))
 		}
 		fmt.Println("--------------------------------")
 	}
+}
+
+// findMaxWidth는 지정된 함수를 사용하여 최대 너비를 찾습니다
+func findMaxWidth(trades []backtest.Trade, getField func(backtest.Trade) string, header string) int {
+	maxLen := len(header)
+
+	for _, trade := range trades {
+		fieldLen := len(getField(trade))
+		if fieldLen > maxLen {
+			maxLen = fieldLen
+		}
+	}
+
+	// 최소 패딩 추가
+	return maxLen + 10
 }
 
 // sendBacktestResultToDiscord는 백테스트 결과를 Discord로 전송합니다
@@ -929,6 +990,8 @@ package backtest
 
 import (
 	"fmt"
+	"log"
+	"math"
 	"time"
 
 	"github.com/assist-by/phoenix/internal/config"
@@ -1042,6 +1105,28 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 		return fmt.Errorf("이미 청산된 포지션입니다")
 	}
 
+	// 청산가가 유효한지 확인 (0이나 음수인 경우 처리)
+	if closePrice <= 0 {
+		log.Printf("경고: 유효하지 않은 청산가 (%.2f), 현재 가격으로 대체합니다", closePrice)
+		// 유효한 마지막 가격으로 대체 (이전 함수에서 전달받아야 함)
+		return fmt.Errorf("유효하지 않은 청산가: %.2f", closePrice)
+	}
+
+	// 청산 시간이 진입 시간보다 이전이면 경고 로그
+	if closeTime.Before(position.EntryTime) {
+		log.Printf("경고: 청산 시간이 진입 시간보다 이전입니다 (포지션: %s, 진입: %s, 청산: %s)",
+			position.Symbol, position.EntryTime.Format("2006-01-02 15:04:05"),
+			closeTime.Format("2006-01-02 15:04:05"))
+		// 청산 시간을 진입 시간 이후로 조정
+		closeTime = position.EntryTime.Add(time.Minute)
+	}
+
+	// 특히 Signal Reversal 경우 로그 추가
+	if reason == SignalReversal {
+		log.Printf("Signal Reversal 청산: %s %s, 진입가: %.2f, 청산가: %.2f",
+			position.Symbol, string(position.Side), position.EntryPrice, closePrice)
+	}
+
 	// 청산가 조정 (슬리피지 적용)
 	if position.Side == domain.LongPosition {
 		closePrice *= (1 - m.SlippagePct/100)
@@ -1072,13 +1157,22 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	// 포지션 초기 가치 계산 (레버리지 적용 전)
 	initialValue := position.EntryPrice * position.Quantity
 
+	// PnL 퍼센트 계산 전에 초기 가치가 0인지 체크 (0으로 나누기 방지)
+	var pnlPercentage float64
+	if initialValue > 0 {
+		pnlPercentage = (pnl / initialValue) * 100
+	} else {
+		pnlPercentage = 0 // 기본값 설정
+		log.Printf("경고: 포지션 초기 가치가 0 또는 음수입니다 (심볼: %s)", position.Symbol)
+	}
+
 	// 포지션 상태 업데이트
 	position.ClosePrice = closePrice
 	position.CloseTime = closeTime
 	position.Status = Closed
 	position.ExitReason = reason
 	position.PnL = pnl
-	position.PnLPercentage = (pnl / initialValue) * 100
+	position.PnLPercentage = pnlPercentage
 
 	// 계정 잔고 업데이트
 	m.Account.Balance += pnl
@@ -1151,7 +1245,11 @@ func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInte
 			closedPositions = append(closedPositions, position)
 		} else if signalReversal {
 			// 시그널 반전으로 청산 (현재 캔들 종가로 청산)
-			m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal)
+			if err := m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal); err != nil {
+				// 오류 처리 (예: 청산가가 유효하지 않은 경우)
+				log.Printf("시그널 반전으로 청산 실패 (%s): %v", symbol, err)
+				continue
+			}
 			closedPositions = append(closedPositions, position)
 		}
 	}
@@ -1213,15 +1311,24 @@ func (m *Manager) GetBacktestResult(startTime, endTime time.Time, symbol string,
 	winningTrades := 0
 	losingTrades := 0
 	totalProfitPct := 0.0
+	validTradeCount := 0
 
 	// 포지션 분석
 	for _, trade := range m.Account.ClosedTrades {
-		if trade.PnL > 0 {
-			winningTrades++
+		// NaN 값 검사 추가
+		if !math.IsNaN(trade.PnLPercentage) {
+			if trade.PnL > 0 {
+				winningTrades++
+			} else {
+				losingTrades++
+			}
+			totalProfitPct += trade.PnLPercentage
+			validTradeCount++
 		} else {
-			losingTrades++
+			// NaN인 경우 로그에 기록 (디버깅용)
+			log.Printf("경고: NaN 수익률이 발견됨 (심볼: %s, 포지션: %s, 청산이유: %d)",
+				trade.Symbol, string(trade.Side), trade.ExitReason)
 		}
-		totalProfitPct += trade.PnLPercentage
 	}
 
 	// 승률 계산
@@ -1244,7 +1351,7 @@ func (m *Manager) GetBacktestResult(startTime, endTime time.Time, symbol string,
 
 	// 결과 생성
 	return &Result{
-		TotalTrades:      totalTrades,
+		TotalTrades:      validTradeCount,
 		WinningTrades:    winningTrades,
 		LosingTrades:     losingTrades,
 		WinRate:          winRate,
@@ -2213,8 +2320,100 @@ func (c *Client) getServerTime() int64 {
 	return time.Now().UnixMilli() + c.serverTimeOffset
 }
 
-// GetKlines는 캔들 데이터를 조회합니다
+// GetKlines는 캔들 데이터를 조회합니다 (대용량 데이터 처리 지원)
 func (c *Client) GetKlines(ctx context.Context, symbol string, interval domain.TimeInterval, limit int) (domain.CandleList, error) {
+	const maxLimit = 1000 // 바이낸스 API 최대 제한
+
+	// 요청 캔들 수가 최대 제한보다 적으면 단일 요청
+	if limit <= maxLimit {
+		return c.getKlinesSimple(ctx, symbol, interval, limit)
+	}
+
+	// 대용량 데이터는 여러 번 나눠서 요청
+	var allCandles domain.CandleList
+	remainingCandles := limit
+	var endTime int64 = 0 // 첫 요청은 현재 시간부터
+
+	for remainingCandles > 0 {
+		fetchLimit := min(remainingCandles, maxLimit)
+		params := url.Values{}
+		params.Add("symbol", symbol)
+		params.Add("interval", string(interval))
+		params.Add("limit", strconv.Itoa(fetchLimit))
+
+		// endTime 파라미터 추가 (두 번째 요청부터)
+		if endTime > 0 {
+			params.Add("endTime", strconv.FormatInt(endTime, 10))
+		}
+
+		resp, err := c.doRequest(ctx, http.MethodGet, "/fapi/v1/klines", params, false)
+		if err != nil {
+			return nil, err
+		}
+
+		var rawCandles [][]interface{}
+		if err := json.Unmarshal(resp, &rawCandles); err != nil {
+			return nil, fmt.Errorf("캔들 데이터 파싱 실패: %w", err)
+		}
+
+		if len(rawCandles) == 0 {
+			break // 더 이상 데이터가 없음
+		}
+
+		// 캔들 변환 및 추가
+		candles := make(domain.CandleList, len(rawCandles))
+		for i, raw := range rawCandles {
+			openTime := int64(raw[0].(float64))
+			closeTime := int64(raw[6].(float64))
+
+			// 다음 요청의 endTime 설정 (가장 오래된 캔들의 시작 시간 - 1ms)
+			if i == len(rawCandles)-1 {
+				endTime = openTime - 1
+			}
+
+			// 가격 문자열 변환
+			open, _ := strconv.ParseFloat(raw[1].(string), 64)
+			high, _ := strconv.ParseFloat(raw[2].(string), 64)
+			low, _ := strconv.ParseFloat(raw[3].(string), 64)
+			close, _ := strconv.ParseFloat(raw[4].(string), 64)
+			volume, _ := strconv.ParseFloat(raw[5].(string), 64)
+
+			candles[i] = domain.Candle{
+				OpenTime:  time.Unix(openTime/1000, 0),
+				CloseTime: time.Unix(closeTime/1000, 0),
+				Open:      open,
+				High:      high,
+				Low:       low,
+				Close:     close,
+				Volume:    volume,
+				Symbol:    symbol,
+				Interval:  interval,
+			}
+		}
+
+		// 결과 병합
+		allCandles = append(candles, allCandles...)
+		remainingCandles -= len(rawCandles)
+
+		// 받은 캔들 수가 요청한 것보다 적으면 더 이상 데이터가 없는 것
+		if len(rawCandles) < fetchLimit {
+			break
+		}
+
+		// API 속도 제한 방지를 위한 짧은 지연
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// 요청한 개수만큼 반환 (초과분 제거)
+	if len(allCandles) > limit {
+		return allCandles[:limit], nil
+	}
+
+	return allCandles, nil
+}
+
+// getKlinesSimple은 단일 요청으로 캔들 데이터를 조회합니다 (기존 로직)
+func (c *Client) getKlinesSimple(ctx context.Context, symbol string, interval domain.TimeInterval, limit int) (domain.CandleList, error) {
 	params := url.Values{}
 	params.Add("symbol", symbol)
 	params.Add("interval", string(interval))

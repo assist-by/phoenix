@@ -45,7 +45,7 @@ func NewStrategy(config map[string]interface{}) (strategy.Strategy, error) {
 	emaLength := 200
 	stopLossPct := 0.02
 	takeProfitPct := 0.04
-	minHistogram := 0.00005
+	minHistogram := 0.005
 	maxWaitCandles := 5
 
 	// 설정에서 값 로드
