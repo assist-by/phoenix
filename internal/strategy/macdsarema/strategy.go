@@ -188,7 +188,7 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 
 	// 1. 대기 상태 확인 및 업데이트
 	if state.PendingSignal != domain.NoSignal {
-		pendingSignal := s.processPendingState(state, symbol, conditions, currentPrice, currentHistogram, sarBelowCandle, sarAboveCandle, currentSAR)
+		pendingSignal := s.processPendingState(state, symbol, conditions, currentPrice, currentHistogram, sarBelowCandle, sarAboveCandle, currentSAR, lastCandle.Time)
 		if pendingSignal != nil {
 			// 상태 업데이트
 			state.PrevMACD = currentMACD
@@ -210,8 +210,9 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		stopLoss = currentSAR                                 // SAR 기반 손절가
 		takeProfit = currentPrice + (currentPrice - stopLoss) // 1:1 비율
 
-		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
-			symbol, currentPrice, currentEMA, currentSAR)
+		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f (시간: %s)",
+			symbol, currentPrice, currentEMA, currentSAR,
+			lastCandle.Time.Format("2006-01-02 15:04:05"))
 	}
 
 	// Short 시그널
@@ -224,8 +225,9 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		stopLoss = currentSAR                                 // SAR 기반 손절가
 		takeProfit = currentPrice - (stopLoss - currentPrice) // 1:1 비율
 
-		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
-			symbol, currentPrice, currentEMA, currentSAR)
+		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f (시간: %s)",
+			symbol, currentPrice, currentEMA, currentSAR,
+			lastCandle.Time.Format("2006-01-02 15:04:05"))
 	}
 
 	// 3. 새로운 대기 상태 설정 (일반 시그널이 아닌 경우)
@@ -234,14 +236,16 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		if isAboveEMA && macdCross == 1 && !sarBelowCandle && currentHistogram > 0 {
 			state.PendingSignal = domain.PendingLong
 			state.WaitedCandles = 0
-			log.Printf("[%s] Long 대기 상태 시작: MACD 상향돌파, SAR 반전 대기", symbol)
+			log.Printf("[%s] Long 대기 상태 시작: MACD 상향돌파, SAR 반전 대기 (시간: %s)",
+				symbol, lastCandle.Time.Format("2006-01-02 15:04:05"))
 		}
 
 		// MACD 하향돌파 + EMA 아래 + SAR이 캔들 위가 아닌 경우 → 숏 대기 상태
 		if !isAboveEMA && macdCross == -1 && !sarAboveCandle && currentHistogram < 0 {
 			state.PendingSignal = domain.PendingShort
 			state.WaitedCandles = 0
-			log.Printf("[%s] Short 대기 상태 시작: MACD 하향돌파, SAR 반전 대기", symbol)
+			log.Printf("[%s] Short 대기 상태 시작: MACD 하향돌파, SAR 반전 대기 (시간: %s)",
+				symbol, lastCandle.Time.Format("2006-01-02 15:04:05"))
 		}
 	}
 
@@ -330,13 +334,15 @@ func (s *MACDSAREMAStrategy) processPendingState(
 	sarBelowCandle bool,
 	sarAboveCandle bool,
 	currentSAR float64,
+	currentTime time.Time,
 ) domain.SignalInterface {
 	// 캔들 카운트 증가
 	state.WaitedCandles++
 
 	// 최대 대기 시간 초과 체크
 	if state.WaitedCandles > state.MaxWaitCandles {
-		log.Printf("[%s] 대기 상태 취소: 최대 대기 캔들 수 (%d) 초과", symbol, state.MaxWaitCandles)
+		log.Printf("[%s] 대기 상태 취소: 최대 대기 캔들 수 (%d) 초과 (시간: %s)",
+			symbol, state.MaxWaitCandles, currentTime.Format("2006-01-02 15:04:05"))
 		s.resetPendingState(state)
 		return nil
 	}
@@ -349,8 +355,9 @@ func (s *MACDSAREMAStrategy) processPendingState(
 	if state.PendingSignal == domain.PendingLong {
 		// 히스토그램이 음수로 바뀌면 취소(추세 역전)
 		if currentHistogram < 0 && state.PrevHistogram > 0 {
-			log.Printf("[%s] Long 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f)",
-				symbol, state.PrevHistogram, currentHistogram)
+			log.Printf("[%s] Long 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f) (시간: %s)",
+				symbol, state.PrevHistogram, currentHistogram,
+				currentTime.Format("2006-01-02 15:04:05"))
 			s.resetPendingState(state)
 			return nil
 		}
@@ -361,8 +368,9 @@ func (s *MACDSAREMAStrategy) processPendingState(
 			stopLoss = currentSAR
 			takeProfit = currentPrice + (currentPrice - stopLoss)
 
-			log.Printf("[%s] Long 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
-				symbol, state.WaitedCandles)
+			log.Printf("[%s] Long 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인 (시간: %s)",
+				symbol, state.WaitedCandles,
+				currentTime.Format("2006-01-02 15:04:05"))
 
 			s.resetPendingState(state)
 			// return resultSignal
@@ -373,8 +381,9 @@ func (s *MACDSAREMAStrategy) processPendingState(
 	if state.PendingSignal == domain.PendingShort {
 		// 히스토그램이 양수로 바뀌면 취소 (추세 역전)
 		if currentHistogram > 0 && state.PrevHistogram < 0 {
-			log.Printf("[%s] Short 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f)",
-				symbol, state.PrevHistogram, currentHistogram)
+			log.Printf("[%s] Short 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f) (시간: %s)",
+				symbol, state.PrevHistogram, currentHistogram,
+				currentTime.Format("2006-01-02 15:04:05"))
 			s.resetPendingState(state)
 			return nil
 		}
@@ -385,8 +394,9 @@ func (s *MACDSAREMAStrategy) processPendingState(
 			stopLoss = currentSAR
 			takeProfit = currentPrice - (stopLoss - currentPrice)
 
-			log.Printf("[%s] Short 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
-				symbol, state.WaitedCandles)
+			log.Printf("[%s] Short 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인 (시간: %s)",
+				symbol, state.WaitedCandles,
+				currentTime.Format("2006-01-02 15:04:05"))
 
 			s.resetPendingState(state)
 			// return resultSignal

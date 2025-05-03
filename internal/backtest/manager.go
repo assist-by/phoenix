@@ -135,8 +135,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 
 	// 특히 Signal Reversal 경우 로그 추가
 	if reason == SignalReversal {
-		log.Printf("Signal Reversal 청산: %s %s, 진입가: %.2f, 청산가: %.2f",
-			position.Symbol, string(position.Side), position.EntryPrice, closePrice)
+		log.Printf("Signal Reversal 청산: %s %s, 진입가: %.2f, 청산가: %.2f (시간: %s)",
+			position.Symbol, string(position.Side), position.EntryPrice, closePrice,
+			time.Now().Format("2006-01-02 15:04:05"))
 	}
 
 	// 청산가 조정 (슬리피지 적용)

@@ -107,10 +107,12 @@ func (e *Engine) Run() (*Result, error) {
 		// 신호가 있는 경우 포지션 진입
 		if signal != nil && signal.GetType() != domain.NoSignal {
 			if _, err := e.Manager.OpenPosition(signal, currentCandle); err != nil {
-				log.Printf("포지션 진입 실패 (캔들 %d): %v", i, err)
+				log.Printf("포지션 진입 실패 (캔들 %d) (캔들시간: %s): %v", i, err,
+					currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 			} else {
-				log.Printf("포지션 진입: %s %s @ %.2f",
-					e.Symbol, signal.GetType().String(), signal.GetPrice())
+				log.Printf("포지션 진입: %s %s @ %.2f (캔들시간: %s)",
+					e.Symbol, signal.GetType().String(), signal.GetPrice(),
+					currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 			}
 		}
 
@@ -119,11 +121,12 @@ func (e *Engine) Run() (*Result, error) {
 
 		// 청산된 포지션 로깅
 		for _, pos := range closedPositions {
-			log.Printf("포지션 청산: %s %s, 수익: %.2f%%, 이유: %s",
+			log.Printf("포지션 청산: %s %s, 수익: %.2f%%, 이유: %s (캔들시간: %s)",
 				pos.Symbol,
 				string(pos.Side),
 				pos.PnLPercentage,
-				getExitReasonString(pos.ExitReason))
+				getExitReasonString(pos.ExitReason),
+				currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 		}
 
 		// 계정 자산 업데이트
