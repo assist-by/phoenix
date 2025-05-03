@@ -2,9 +2,11 @@ package indicator
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
+// ------------ 결과 -------------------------------------------------------
 // EMAResult는 EMA 지표 계산 결과입니다
 type EMAResult struct {
 	Value     float64
@@ -16,6 +18,7 @@ func (r EMAResult) GetTimestamp() time.Time {
 	return r.Timestamp
 }
 
+// ------------ 본체 -------------------------------------------------------
 // EMA는 지수이동평균 지표를 구현합니다
 type EMA struct {
 	BaseIndicator
@@ -41,63 +44,40 @@ func (e *EMA) Calculate(prices []PriceData) ([]Result, error) {
 		return nil, err
 	}
 
-	period := e.Period
-	// EMA 계산을 위한 승수 계산
-	multiplier := 2.0 / float64(period+1)
+	p := e.Period
+	multiplier := 2.0 / float64(p+1)
 	results := make([]Result, len(prices))
 
-	// 초기 SMA 계산
-	var sma float64
-	for i := 0; i < period; i++ {
-		sma += prices[i].Close
+	// --- 1. 초기 SMA ----------------------------------------------------
+	sum := 0.0
+	for i := 0; i < p; i++ {
+		sum += prices[i].Close
+		results[i] = EMAResult{Value: math.NaN(), Timestamp: prices[i].Time}
 	}
-	sma /= float64(period)
+	ema := sum / float64(p)
+	results[p-1] = EMAResult{Value: ema, Timestamp: prices[p-1].Time}
 
-	// 첫 번째 EMA는 SMA 값으로 설정
-	results[period-1] = EMAResult{
-		Value:     sma,
-		Timestamp: prices[period-1].Time,
+	// --- 2. 이후 EMA ----------------------------------------------------
+	for i := p; i < len(prices); i++ {
+		ema = (prices[i].Close-ema)*multiplier + ema
+		results[i] = EMAResult{Value: ema, Timestamp: prices[i].Time}
 	}
-
-	// EMA 계산: EMA = 이전 EMA + (현재가 - 이전 EMA) × 승수
-	for i := period; i < len(prices); i++ {
-		// 이전 결과가 nil인지 확인
-		if results[i-1] == nil {
-			continue // nil이면 이 단계 건너뜀
-		}
-
-		// 안전한 타입 변환
-		prevResult, ok := results[i-1].(EMAResult)
-		if !ok {
-			return nil, fmt.Errorf("EMA 결과 타입 변환 실패 (인덱스: %d)", i-1)
-		}
-
-		prevEMA := prevResult.Value
-		ema := (prices[i].Close-prevEMA)*multiplier + prevEMA
-		results[i] = EMAResult{
-			Value:     ema,
-			Timestamp: prices[i].Time,
-		}
-	}
-
 	return results, nil
 }
 
 // validateInput은 입력 데이터가 유효한지 검증합니다
 func (e *EMA) validateInput(prices []PriceData) error {
-	if len(prices) == 0 {
-		return &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("가격 데이터가 비어있습니다"),
-		}
+	if e.Period <= 0 {
+		return &ValidationError{Field: "period", Err: fmt.Errorf("period must be > 0")}
 	}
-
+	if len(prices) == 0 {
+		return &ValidationError{Field: "prices", Err: fmt.Errorf("가격 데이터가 비어있습니다")}
+	}
 	if len(prices) < e.Period {
 		return &ValidationError{
 			Field: "prices",
 			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d, 현재: %d", e.Period, len(prices)),
 		}
 	}
-
 	return nil
 }

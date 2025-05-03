@@ -2,8 +2,11 @@ package indicator
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
+
+// ---------------- 결과 -----------------------------------------------
 
 // MACDResult는 MACD 지표 계산 결과입니다
 type MACDResult struct {
@@ -18,6 +21,7 @@ func (r MACDResult) GetTimestamp() time.Time {
 	return r.Timestamp
 }
 
+// ---------------- 본체 -------------------------------------------------
 // MACD는 Moving Average Convergence Divergence 지표를 구현합니다
 type MACD struct {
 	BaseIndicator
@@ -49,110 +53,63 @@ func (m *MACD) Calculate(prices []PriceData) ([]Result, error) {
 		return nil, err
 	}
 
-	// 단기 EMA 계산
-	shortEMA := NewEMA(m.ShortPeriod)
-	shortEMAResults, err := shortEMA.Calculate(prices)
-	if err != nil {
-		return nil, fmt.Errorf("단기 EMA 계산 실패: %w", err)
-	}
+	// -------- ① 두 EMA 계산 ------------------------------------------
+	shortEMARes, _ := NewEMA(m.ShortPeriod).Calculate(prices)
+	longEMARes, _ := NewEMA(m.LongPeriod).Calculate(prices)
 
-	// 장기 EMA 계산
-	longEMA := NewEMA(m.LongPeriod)
-	longEMAResults, err := longEMA.Calculate(prices)
-	if err != nil {
-		return nil, fmt.Errorf("장기 EMA 계산 실패: %w", err)
-	}
+	longStart := m.LongPeriod - 1 // 첫 MACD가 존재하는 인덱스
+	macdLen := len(prices) - longStart
+	macdPD := make([]PriceData, macdLen) // MACD 값을 PriceData 형태로 저장
 
-	// MACD 라인 계산 (단기 EMA - 장기 EMA)
-	macdStartIdx := m.LongPeriod - 1
-	macdLine := make([]PriceData, len(prices)-macdStartIdx)
-
-	// 이 부분에 타입 안전성 확보를 위한 체크 추가
-	for i := range macdLine {
-		idx := i + macdStartIdx
-		// nil 체크 추가
-		if shortEMAResults[idx] == nil || longEMAResults[idx] == nil {
-			continue // nil인 경우 건너뛰기
-		}
-
-		// 안전한 타입 변환
-		shortVal, ok1 := shortEMAResults[idx].(EMAResult)
-		longVal, ok2 := longEMAResults[idx].(EMAResult)
-
-		if !ok1 || !ok2 {
-			return nil, fmt.Errorf("EMA 결과 타입 변환 실패 (인덱스: %d)", idx)
-		}
-
-		macdLine[i] = PriceData{
+	for i := 0; i < macdLen; i++ {
+		idx := i + longStart
+		se := shortEMARes[idx].(EMAResult)
+		le := longEMARes[idx].(EMAResult)
+		macdPD[i] = PriceData{
 			Time:  prices[idx].Time,
-			Close: shortVal.Value - longVal.Value,
+			Close: se.Value - le.Value,
 		}
 	}
 
-	// 시그널 라인 계산 (MACD의 EMA)
-	signalEMA := NewEMA(m.SignalPeriod)
-	signalEMAResults, err := signalEMA.Calculate(macdLine)
-	if err != nil {
-		return nil, fmt.Errorf("시그널 라인 계산 실패: %w", err)
-	}
+	// -------- ② 시그널 EMA 계산 --------------------------------------
+	signalRes, _ := NewEMA(m.SignalPeriod).Calculate(macdPD)
 
-	// 최종 결과 생성
-	resultStartIdx := m.SignalPeriod - 1
-	results := make([]Result, len(prices))
-
-	// 결과가 없는 초기 인덱스는 nil로 설정
-	for i := 0; i < macdStartIdx+resultStartIdx; i++ {
-		results[i] = nil
-	}
-
-	// 실제 MACD 결과 설정
-	for i := 0; i < len(macdLine)-resultStartIdx; i++ {
-		resultIdx := i + macdStartIdx + resultStartIdx
-
-		// nil 체크 추가
-		if i+resultStartIdx >= len(macdLine) || i >= len(signalEMAResults) || signalEMAResults[i] == nil {
-			results[resultIdx] = nil
-			continue
-		}
-
-		macdValue := macdLine[i+resultStartIdx].Close
-
-		// 안전한 타입 변환
-		signalEMAResult, ok := signalEMAResults[i].(EMAResult)
-		if !ok {
-			results[resultIdx] = nil
-			continue
-		}
-
-		signalValue := signalEMAResult.Value
-
-		results[resultIdx] = MACDResult{
-			MACD:      macdValue,
-			Signal:    signalValue,
-			Histogram: macdValue - signalValue,
-			Timestamp: macdLine[i+resultStartIdx].Time,
+	// -------- ③ 최종 결과 조합 ---------------------------------------
+	out := make([]Result, len(prices))
+	for i := 0; i < longStart+m.SignalPeriod-1; i++ {
+		out[i] = MACDResult{
+			MACD:      math.NaN(),
+			Signal:    math.NaN(),
+			Histogram: math.NaN(),
+			Timestamp: prices[i].Time,
 		}
 	}
 
-	return results, nil
+	for i := m.SignalPeriod - 1; i < macdLen; i++ {
+		priceIdx := i + longStart             // 원본 가격 인덱스
+		sig := signalRes[i].(EMAResult).Value // 시그널 값
+		macdVal := macdPD[i].Close            // MACD 값
+		out[priceIdx] = MACDResult{macdVal, sig, macdVal - sig, macdPD[i].Time}
+	}
+	return out, nil
 }
 
+// ---------------- 검증 -------------------------------------------------
 // validateInput은 입력 데이터가 유효한지 검증합니다
 func (m *MACD) validateInput(prices []PriceData) error {
-	if len(prices) == 0 {
-		return &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("가격 데이터가 비어있습니다"),
-		}
+	switch {
+	case m.ShortPeriod <= 0, m.LongPeriod <= 0, m.SignalPeriod <= 0:
+		return &ValidationError{Field: "period", Err: fmt.Errorf("periods must be > 0")}
+	case m.ShortPeriod >= m.LongPeriod:
+		return &ValidationError{Field: "period", Err: fmt.Errorf("ShortPeriod must be < LongPeriod")}
 	}
 
-	minPeriod := m.LongPeriod + m.SignalPeriod - 1
-	if len(prices) < minPeriod {
+	need := (m.LongPeriod - 1) + m.SignalPeriod
+	if len(prices) < need {
 		return &ValidationError{
 			Field: "prices",
-			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d, 현재: %d", minPeriod, len(prices)),
+			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d, 현재: %d", need, len(prices)),
 		}
 	}
-
 	return nil
 }
