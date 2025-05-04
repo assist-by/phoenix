@@ -294,7 +294,8 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 				return false, nil
 			}
 
-			// 반대 방향의 포지션이 있으면 청산 필요
+			// 반대 방향의 포지션이 있을 경우, Signal Reversal 처리
+			// 기존 포지션은 청산하고, 새 포지션 진입은 허용 (true 반환)
 			if m.notifier != nil {
 				m.notifier.SendInfo(fmt.Sprintf("반대 방향 포지션 감지: %s, 수량: %.8f, 방향: %s",
 					symbol, math.Abs(pos.Quantity), pos.PositionSide))
@@ -337,9 +338,9 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 
 				if cleared {
 					if m.notifier != nil {
-						m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션이 성공적으로 청산되었습니다.", symbol))
+						m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션이 성공적으로 청산되었습니다. 반대 포지션 진입 준비 완료", symbol))
 					}
-					return true, nil
+					return true, nil // 청산 성공, 새 포지션 진입 허용
 				}
 
 				time.Sleep(m.retryDelay)

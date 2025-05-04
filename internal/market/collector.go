@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math"
 	"strings"
 	"sync"
 	"time"
@@ -179,71 +178,6 @@ func (c *Collector) Collect(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-// CalculatePosition은 코인의 특성과 최소 주문 단위를 고려하여 실제 포지션 크기와 수량을 계산합니다
-// 단계별 계산:
-// 1. 이론적 최대 포지션 = 가용잔고 × 레버리지
-// 2. 이론적 최대 수량 = 이론적 최대 포지션 ÷ 코인 가격
-// 3. 실제 수량 = 이론적 최대 수량을 최소 주문 단위로 내림
-// 4. 실제 포지션 가치 = 실제 수량 × 코인 가격
-// 5. 수수료 및 마진 고려해 최종 조정
-func (c *Collector) CalculatePosition(
-	balance float64, // 가용 잔고
-	totalBalance float64, // 총 잔고 (usdtBalance.CrossWalletBalance)
-	leverage int, // 레버리지
-	coinPrice float64, // 코인 현재 가격
-	stepSize float64, // 코인 최소 주문 단위
-	maintMargin float64, // 유지증거금률
-) (PositionSizeResult, error) {
-	// 1. 사용 가능한 잔고에서 항상 90%만 사용
-	maxAllocationPercent := 0.9
-	allocatedBalance := totalBalance * maxAllocationPercent
-
-	// 가용 잔고가 필요한 할당 금액보다 작은 경우 에러 반환
-	if balance < allocatedBalance {
-		return PositionSizeResult{}, fmt.Errorf("가용 잔고가 부족합니다: 필요 %.2f USDT, 현재 %.2f USDT",
-			allocatedBalance, balance)
-	}
-
-	// 2. 레버리지 적용 및 수수료 고려
-	totalFeeRate := 0.002 // 0.2% (진입 + 청산 수수료 + 여유분)
-	effectiveMargin := maintMargin + totalFeeRate
-
-	// 안전하게 사용 가능한 최대 포지션 가치 계산
-	maxSafePositionValue := (allocatedBalance * float64(leverage)) / (1 + effectiveMargin)
-
-	// 3. 최대 안전 수량 계산
-	maxSafeQuantity := maxSafePositionValue / coinPrice
-
-	// 4. 최소 주문 단위로 수량 조정
-	// stepSize가 0.001이면 소수점 3자리
-	precision := 0
-	temp := stepSize
-	for temp < 1.0 {
-		temp *= 10
-		precision++
-	}
-
-	// 소수점 자릿수에 맞춰 내림 계산
-	scale := math.Pow(10, float64(precision))
-	steps := math.Floor(maxSafeQuantity / stepSize)
-	adjustedQuantity := steps * stepSize
-
-	// 소수점 자릿수 정밀도 보장
-	adjustedQuantity = math.Floor(adjustedQuantity*scale) / scale
-
-	// 5. 최종 포지션 가치 계산
-	finalPositionValue := adjustedQuantity * coinPrice
-
-	// 포지션 크기에 대한 추가 안전장치 (최소값과 최대값 제한)
-	finalPositionValue = math.Min(finalPositionValue, maxSafePositionValue)
-
-	// 소수점 2자리까지 내림 (USDT 기준)
-	return PositionSizeResult{
-		PositionValue: math.Floor(finalPositionValue*100) / 100,
-		Quantity:      adjustedQuantity,
-	}, nil
 }
 
 // TODO: 단순 상향돌파만 체크하는게 아니라 MACD가 0 이상인지 이하인지 그거도 추세 판단하는데 사용되는걸 적용해야한다.

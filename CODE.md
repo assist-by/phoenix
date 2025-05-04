@@ -19,6 +19,7 @@ phoenix/
         ├── candle.go
         ├── order.go
         ├── signal.go
+        ├── timeframe.go
         ├── types.go
         └── utils.go
     ├── exchange/
@@ -29,6 +30,7 @@ phoenix/
         ├── ema.go
         ├── indicator.go
         ├── macd.go
+        ├── rsi.go
         └── sar.go
     ├── market/
         ├── client.go
@@ -556,7 +558,7 @@ func findMaxWidth(trades []backtest.Trade, getField func(backtest.Trade) string,
 	}
 
 	// 최소 패딩 추가
-	return maxLen + 10
+	return maxLen + 5
 }
 
 // sendBacktestResultToDiscord는 백테스트 결과를 Discord로 전송합니다
@@ -694,10 +696,21 @@ func (e *Engine) Run() (*Result, error) {
 		// 신호가 있는 경우 포지션 진입
 		if signal != nil && signal.GetType() != domain.NoSignal {
 			if _, err := e.Manager.OpenPosition(signal, currentCandle); err != nil {
-				log.Printf("포지션 진입 실패 (캔들 %d): %v", i, err)
+				log.Printf("포지션 진입 실패 (캔들 %d) (캔들시간: %s): %v", i, err,
+					currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 			} else {
-				log.Printf("포지션 진입: %s %s @ %.2f",
-					e.Symbol, signal.GetType().String(), signal.GetPrice())
+				sign := 1.0
+				if signal.GetType() != domain.Long {
+					sign = -1.0
+				}
+
+				log.Printf("포지션 진입: %s %s @ %.2f, SL: %.2f (%.2f%%), TP: %.2f (%.2f%%) (캔들시간: %s)",
+					e.Symbol, signal.GetType().String(), signal.GetPrice(),
+					signal.GetStopLoss(),
+					(signal.GetStopLoss()-signal.GetPrice())/signal.GetPrice()*100*sign,
+					signal.GetTakeProfit(),
+					(signal.GetTakeProfit()-signal.GetPrice())/signal.GetPrice()*100*sign,
+					currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 			}
 		}
 
@@ -706,11 +719,12 @@ func (e *Engine) Run() (*Result, error) {
 
 		// 청산된 포지션 로깅
 		for _, pos := range closedPositions {
-			log.Printf("포지션 청산: %s %s, 수익: %.2f%%, 이유: %s",
+			log.Printf("포지션 청산: %s %s, 수익: %.2f%%, 이유: %s (캔들시간: %s)",
 				pos.Symbol,
 				string(pos.Side),
 				pos.PnLPercentage,
-				getExitReasonString(pos.ExitReason))
+				getExitReasonString(pos.ExitReason),
+				currentCandle.OpenTime.Format("2006-01-02 15:04:05"))
 		}
 
 		// 계정 자산 업데이트
@@ -1085,7 +1099,7 @@ func (m *Manager) OpenPosition(signal domain.SignalInterface, candle domain.Cand
 		Symbol:     symbol,
 		Side:       side,
 		EntryPrice: entryPrice,
-		Quantity:   quantity,
+		Quantity:   math.Abs(quantity),
 		EntryTime:  candle.OpenTime,
 		StopLoss:   signal.GetStopLoss(),
 		TakeProfit: signal.GetTakeProfit(),
@@ -1108,7 +1122,6 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	// 청산가가 유효한지 확인 (0이나 음수인 경우 처리)
 	if closePrice <= 0 {
 		log.Printf("경고: 유효하지 않은 청산가 (%.2f), 현재 가격으로 대체합니다", closePrice)
-		// 유효한 마지막 가격으로 대체 (이전 함수에서 전달받아야 함)
 		return fmt.Errorf("유효하지 않은 청산가: %.2f", closePrice)
 	}
 
@@ -1123,8 +1136,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 
 	// 특히 Signal Reversal 경우 로그 추가
 	if reason == SignalReversal {
-		log.Printf("Signal Reversal 청산: %s %s, 진입가: %.2f, 청산가: %.2f",
-			position.Symbol, string(position.Side), position.EntryPrice, closePrice)
+		log.Printf("Signal Reversal 청산: %s %s, 진입가: %.2f, 청산가: %.2f (시간: %s)",
+			position.Symbol, string(position.Side), position.EntryPrice, closePrice,
+			time.Now().Format("2006-01-02 15:04:05"))
 	}
 
 	// 청산가 조정 (슬리피지 적용)
@@ -1140,6 +1154,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	// 수수료 계산
 	closeFee := positionValue * m.TakerFee
 
+	log.Printf("DEBUG: 청산 직전 포지션 정보 - 심볼: %s, 사이드: %s, 수량: %.8f, 진입가: %.2f, 청산가: %.2f",
+		position.Symbol, position.Side, position.Quantity, position.EntryPrice, closePrice)
+
 	// PnL 계산
 	var pnl float64
 	if position.Side == domain.LongPosition {
@@ -1147,6 +1164,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	} else {
 		pnl = (position.EntryPrice - closePrice) * position.Quantity
 	}
+
+	log.Printf("DEBUG: PnL 계산 결과 - PnL: %.2f, 사이드: %s, 진입가: %.2f, 청산가: %.2f, 수량: %.8f",
+		pnl, position.Side, position.EntryPrice, closePrice, position.Quantity)
 
 	// 수수료 차감
 	pnl -= closeFee
@@ -1156,6 +1176,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 
 	// 포지션 초기 가치 계산 (레버리지 적용 전)
 	initialValue := position.EntryPrice * position.Quantity
+
+	log.Printf("DEBUG: 초기 포지션 가치 - 가치: %.2f, 진입가: %.2f, 수량: %.8f",
+		initialValue, position.EntryPrice, position.Quantity)
 
 	// PnL 퍼센트 계산 전에 초기 가치가 0인지 체크 (0으로 나누기 방지)
 	var pnlPercentage float64
@@ -1192,8 +1215,8 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 }
 
 // UpdatePositions은 새 캔들 데이터로 모든 포지션을 업데이트합니다
-func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInterface) []*Position {
-	symbol := candle.Symbol
+func (m *Manager) UpdatePositions(currentCandle domain.Candle, signal domain.SignalInterface) []*Position {
+	symbol := currentCandle.Symbol
 	closedPositions := make([]*Position, 0)
 
 	// 현재 열린 포지션 중 해당 심볼에 대한 포지션 확인
@@ -1208,28 +1231,30 @@ func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInte
 
 		if position.Side == domain.LongPosition {
 			// 롱 포지션: 고가가 TP 이상이면 TP 도달, 저가가 SL 이하면 SL 도달
-			if candle.High >= position.TakeProfit {
+			if currentCandle.High >= position.TakeProfit {
 				tpHit = true
 			}
-			if candle.Low <= position.StopLoss {
+			if currentCandle.Low <= position.StopLoss {
 				slHit = true
 			}
 		} else {
 			// 숏 포지션: 저가가 TP 이하면 TP 도달, 고가가 SL 이상이면 SL 도달
-			if candle.Low <= position.TakeProfit {
+			if currentCandle.Low <= position.TakeProfit {
 				tpHit = true
 			}
-			if candle.High >= position.StopLoss {
+			if currentCandle.High >= position.StopLoss {
 				slHit = true
 			}
 		}
 
 		// 2. 시그널 반전 여부 확인
 		signalReversal := false
+		var reversalSignalType domain.SignalType = domain.NoSignal
 		if signal != nil && signal.GetType() != domain.NoSignal {
 			if (position.Side == domain.LongPosition && signal.GetType() == domain.Short) ||
 				(position.Side == domain.ShortPosition && signal.GetType() == domain.Long) {
 				signalReversal = true
+				reversalSignalType = signal.GetType() // 반전 시그널 타입 저장
 			}
 		}
 
@@ -1237,20 +1262,32 @@ func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInte
 		// 동일 캔들에서 TP와 SL 모두 도달하면 SL 우선 처리 (Rules.SlPriority 설정에 따라)
 		if slHit && (m.Rules.SlPriority || !tpHit) {
 			// SL 청산 (저점 또는 고점이 아닌 SL 가격으로 청산)
-			m.ClosePosition(position, position.StopLoss, candle.CloseTime, StopLossHit)
+			m.ClosePosition(position, position.StopLoss, currentCandle.CloseTime, StopLossHit)
 			closedPositions = append(closedPositions, position)
 		} else if tpHit {
 			// TP 청산 (TP 가격으로 청산)
-			m.ClosePosition(position, position.TakeProfit, candle.CloseTime, TakeProfitHit)
+			m.ClosePosition(position, position.TakeProfit, currentCandle.CloseTime, TakeProfitHit)
 			closedPositions = append(closedPositions, position)
 		} else if signalReversal {
 			// 시그널 반전으로 청산 (현재 캔들 종가로 청산)
-			if err := m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal); err != nil {
+			if err := m.ClosePosition(position, currentCandle.Close, currentCandle.CloseTime, SignalReversal); err != nil {
 				// 오류 처리 (예: 청산가가 유효하지 않은 경우)
 				log.Printf("시그널 반전으로 청산 실패 (%s): %v", symbol, err)
 				continue
 			}
 			closedPositions = append(closedPositions, position)
+
+			// 시그널 반전 후 즉시 신규 포지션 진입
+			if reversalSignalType != domain.NoSignal && signal != nil {
+				// 새로운 포지션 생성
+				_, err := m.OpenPosition(signal, currentCandle)
+				if err != nil {
+					log.Printf("시그널 반전 후 새 포지션 진입 실패 (%s): %v", symbol, err)
+				} else {
+					log.Printf("시그널 반전 후 즉시 %s %s 포지션 진입 @ %.2f",
+						symbol, signal.GetType().String(), signal.GetPrice())
+				}
+			}
 		}
 	}
 
@@ -1973,6 +2010,89 @@ func (s *Signal) IsShort() bool {
 // IsPending은 시그널이 대기 상태인지 확인합니다
 func (s *Signal) IsPending() bool {
 	return s.Type == PendingLong || s.Type == PendingShort
+}
+
+```
+## internal/domain/timeframe.go
+```go
+package domain
+
+import (
+	"fmt"
+	"time"
+)
+
+// ConvertHourlyToCurrentDaily는 1시간봉 데이터를 사용하여 특정 시점까지의
+// "현재 진행 중인" 일봉을 생성합니다.
+// hourlyCandles: 1시간봉 캔들 리스트
+// asOf: 기준 시점 (이 시점까지의 데이터로 일봉 구성)
+// Returns: 구성된 일봉 캔들 또는 데이터가 없는 경우 nil
+func ConvertHourlyToCurrentDaily(hourlyCandles CandleList, asOf time.Time) (*Candle, error) {
+	if len(hourlyCandles) == 0 {
+		return nil, fmt.Errorf("캔들 데이터가 비어있습니다")
+	}
+
+	// 시간 정렬 확인 (첫 캔들이 가장 오래된 데이터)
+	for i := 1; i < len(hourlyCandles); i++ {
+		if hourlyCandles[i].OpenTime.Before(hourlyCandles[i-1].OpenTime) {
+			return nil, fmt.Errorf("캔들 데이터가 시간순으로 정렬되어 있지 않습니다")
+		}
+	}
+
+	// asOf와 같은 날짜(UTC 기준)의 캔들만 필터링
+	// UTC 기준 자정(00:00:00)
+	startOfDay := time.Date(
+		asOf.UTC().Year(),
+		asOf.UTC().Month(),
+		asOf.UTC().Day(),
+		0, 0, 0, 0,
+		time.UTC,
+	)
+
+	// 현재 날짜의 캔들 필터링
+	var todayCandles CandleList
+	for _, candle := range hourlyCandles {
+		// 오늘 자정 이후 & asOf 이전 캔들만 포함
+		if !candle.OpenTime.Before(startOfDay) && !candle.OpenTime.After(asOf) {
+			todayCandles = append(todayCandles, candle)
+		}
+	}
+
+	// 해당 날짜의 캔들이 없는 경우
+	if len(todayCandles) == 0 {
+		return nil, fmt.Errorf("지정된 날짜(%s)에 해당하는 캔들 데이터가 없습니다", asOf.Format("2006-01-02"))
+	}
+
+	// 일봉 구성
+	// - 시가: 첫 번째 캔들의 시가
+	// - 고가: 모든 캔들 중 최고가
+	// - 저가: 모든 캔들 중 최저가
+	// - 종가: 마지막 캔들의 종가
+	// - 거래량: 모든 캔들의 거래량 합계
+	dailyCandle := Candle{
+		Symbol:    todayCandles[0].Symbol,
+		Interval:  Interval1d,
+		OpenTime:  startOfDay,
+		CloseTime: time.Date(startOfDay.Year(), startOfDay.Month(), startOfDay.Day(), 23, 59, 59, 999999999, time.UTC),
+		Open:      todayCandles[0].Open,
+		High:      todayCandles[0].High,
+		Low:       todayCandles[0].Low,
+		Close:     todayCandles[len(todayCandles)-1].Close,
+		Volume:    0,
+	}
+
+	// 최고가, 최저가, 거래량 계산
+	for _, candle := range todayCandles {
+		if candle.High > dailyCandle.High {
+			dailyCandle.High = candle.High
+		}
+		if candle.Low < dailyCandle.Low {
+			dailyCandle.Low = candle.Low
+		}
+		dailyCandle.Volume += candle.Volume
+	}
+
+	return &dailyCandle, nil
 }
 
 ```
@@ -2994,9 +3114,11 @@ package indicator
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
 
+// ------------ 결과 -------------------------------------------------------
 // EMAResult는 EMA 지표 계산 결과입니다
 type EMAResult struct {
 	Value     float64
@@ -3008,6 +3130,7 @@ func (r EMAResult) GetTimestamp() time.Time {
 	return r.Timestamp
 }
 
+// ------------ 본체 -------------------------------------------------------
 // EMA는 지수이동평균 지표를 구현합니다
 type EMA struct {
 	BaseIndicator
@@ -3033,64 +3156,41 @@ func (e *EMA) Calculate(prices []PriceData) ([]Result, error) {
 		return nil, err
 	}
 
-	period := e.Period
-	// EMA 계산을 위한 승수 계산
-	multiplier := 2.0 / float64(period+1)
+	p := e.Period
+	multiplier := 2.0 / float64(p+1)
 	results := make([]Result, len(prices))
 
-	// 초기 SMA 계산
-	var sma float64
-	for i := 0; i < period; i++ {
-		sma += prices[i].Close
+	// --- 1. 초기 SMA ----------------------------------------------------
+	sum := 0.0
+	for i := 0; i < p; i++ {
+		sum += prices[i].Close
+		results[i] = EMAResult{Value: math.NaN(), Timestamp: prices[i].Time}
 	}
-	sma /= float64(period)
+	ema := sum / float64(p)
+	results[p-1] = EMAResult{Value: ema, Timestamp: prices[p-1].Time}
 
-	// 첫 번째 EMA는 SMA 값으로 설정
-	results[period-1] = EMAResult{
-		Value:     sma,
-		Timestamp: prices[period-1].Time,
+	// --- 2. 이후 EMA ----------------------------------------------------
+	for i := p; i < len(prices); i++ {
+		ema = (prices[i].Close-ema)*multiplier + ema
+		results[i] = EMAResult{Value: ema, Timestamp: prices[i].Time}
 	}
-
-	// EMA 계산: EMA = 이전 EMA + (현재가 - 이전 EMA) × 승수
-	for i := period; i < len(prices); i++ {
-		// 이전 결과가 nil인지 확인
-		if results[i-1] == nil {
-			continue // nil이면 이 단계 건너뜀
-		}
-
-		// 안전한 타입 변환
-		prevResult, ok := results[i-1].(EMAResult)
-		if !ok {
-			return nil, fmt.Errorf("EMA 결과 타입 변환 실패 (인덱스: %d)", i-1)
-		}
-
-		prevEMA := prevResult.Value
-		ema := (prices[i].Close-prevEMA)*multiplier + prevEMA
-		results[i] = EMAResult{
-			Value:     ema,
-			Timestamp: prices[i].Time,
-		}
-	}
-
 	return results, nil
 }
 
 // validateInput은 입력 데이터가 유효한지 검증합니다
 func (e *EMA) validateInput(prices []PriceData) error {
-	if len(prices) == 0 {
-		return &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("가격 데이터가 비어있습니다"),
-		}
+	if e.Period <= 0 {
+		return &ValidationError{Field: "period", Err: fmt.Errorf("period must be > 0")}
 	}
-
+	if len(prices) == 0 {
+		return &ValidationError{Field: "prices", Err: fmt.Errorf("가격 데이터가 비어있습니다")}
+	}
 	if len(prices) < e.Period {
 		return &ValidationError{
 			Field: "prices",
 			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d, 현재: %d", e.Period, len(prices)),
 		}
 	}
-
 	return nil
 }
 
@@ -3199,8 +3299,11 @@ package indicator
 
 import (
 	"fmt"
+	"math"
 	"time"
 )
+
+// ---------------- 결과 -----------------------------------------------
 
 // MACDResult는 MACD 지표 계산 결과입니다
 type MACDResult struct {
@@ -3215,6 +3318,7 @@ func (r MACDResult) GetTimestamp() time.Time {
 	return r.Timestamp
 }
 
+// ---------------- 본체 -------------------------------------------------
 // MACD는 Moving Average Convergence Divergence 지표를 구현합니다
 type MACD struct {
 	BaseIndicator
@@ -3246,117 +3350,71 @@ func (m *MACD) Calculate(prices []PriceData) ([]Result, error) {
 		return nil, err
 	}
 
-	// 단기 EMA 계산
-	shortEMA := NewEMA(m.ShortPeriod)
-	shortEMAResults, err := shortEMA.Calculate(prices)
-	if err != nil {
-		return nil, fmt.Errorf("단기 EMA 계산 실패: %w", err)
-	}
+	// -------- ① 두 EMA 계산 ------------------------------------------
+	shortEMARes, _ := NewEMA(m.ShortPeriod).Calculate(prices)
+	longEMARes, _ := NewEMA(m.LongPeriod).Calculate(prices)
 
-	// 장기 EMA 계산
-	longEMA := NewEMA(m.LongPeriod)
-	longEMAResults, err := longEMA.Calculate(prices)
-	if err != nil {
-		return nil, fmt.Errorf("장기 EMA 계산 실패: %w", err)
-	}
+	longStart := m.LongPeriod - 1 // 첫 MACD가 존재하는 인덱스
+	macdLen := len(prices) - longStart
+	macdPD := make([]PriceData, macdLen) // MACD 값을 PriceData 형태로 저장
 
-	// MACD 라인 계산 (단기 EMA - 장기 EMA)
-	macdStartIdx := m.LongPeriod - 1
-	macdLine := make([]PriceData, len(prices)-macdStartIdx)
-
-	// 이 부분에 타입 안전성 확보를 위한 체크 추가
-	for i := range macdLine {
-		idx := i + macdStartIdx
-		// nil 체크 추가
-		if shortEMAResults[idx] == nil || longEMAResults[idx] == nil {
-			continue // nil인 경우 건너뛰기
-		}
-
-		// 안전한 타입 변환
-		shortVal, ok1 := shortEMAResults[idx].(EMAResult)
-		longVal, ok2 := longEMAResults[idx].(EMAResult)
-
-		if !ok1 || !ok2 {
-			return nil, fmt.Errorf("EMA 결과 타입 변환 실패 (인덱스: %d)", idx)
-		}
-
-		macdLine[i] = PriceData{
+	for i := 0; i < macdLen; i++ {
+		idx := i + longStart
+		se := shortEMARes[idx].(EMAResult)
+		le := longEMARes[idx].(EMAResult)
+		macdPD[i] = PriceData{
 			Time:  prices[idx].Time,
-			Close: shortVal.Value - longVal.Value,
+			Close: se.Value - le.Value,
 		}
 	}
 
-	// 시그널 라인 계산 (MACD의 EMA)
-	signalEMA := NewEMA(m.SignalPeriod)
-	signalEMAResults, err := signalEMA.Calculate(macdLine)
-	if err != nil {
-		return nil, fmt.Errorf("시그널 라인 계산 실패: %w", err)
-	}
+	// -------- ② 시그널 EMA 계산 --------------------------------------
+	signalRes, _ := NewEMA(m.SignalPeriod).Calculate(macdPD)
 
-	// 최종 결과 생성
-	resultStartIdx := m.SignalPeriod - 1
-	results := make([]Result, len(prices))
-
-	// 결과가 없는 초기 인덱스는 nil로 설정
-	for i := 0; i < macdStartIdx+resultStartIdx; i++ {
-		results[i] = nil
-	}
-
-	// 실제 MACD 결과 설정
-	for i := 0; i < len(macdLine)-resultStartIdx; i++ {
-		resultIdx := i + macdStartIdx + resultStartIdx
-
-		// nil 체크 추가
-		if i+resultStartIdx >= len(macdLine) || i >= len(signalEMAResults) || signalEMAResults[i] == nil {
-			results[resultIdx] = nil
-			continue
-		}
-
-		macdValue := macdLine[i+resultStartIdx].Close
-
-		// 안전한 타입 변환
-		signalEMAResult, ok := signalEMAResults[i].(EMAResult)
-		if !ok {
-			results[resultIdx] = nil
-			continue
-		}
-
-		signalValue := signalEMAResult.Value
-
-		results[resultIdx] = MACDResult{
-			MACD:      macdValue,
-			Signal:    signalValue,
-			Histogram: macdValue - signalValue,
-			Timestamp: macdLine[i+resultStartIdx].Time,
+	// -------- ③ 최종 결과 조합 ---------------------------------------
+	out := make([]Result, len(prices))
+	for i := 0; i < longStart+m.SignalPeriod-1; i++ {
+		out[i] = MACDResult{
+			MACD:      math.NaN(),
+			Signal:    math.NaN(),
+			Histogram: math.NaN(),
+			Timestamp: prices[i].Time,
 		}
 	}
 
-	return results, nil
+	for i := m.SignalPeriod - 1; i < macdLen; i++ {
+		priceIdx := i + longStart             // 원본 가격 인덱스
+		sig := signalRes[i].(EMAResult).Value // 시그널 값
+		macdVal := macdPD[i].Close            // MACD 값
+		out[priceIdx] = MACDResult{macdVal, sig, macdVal - sig, macdPD[i].Time}
+	}
+	return out, nil
 }
 
+// ---------------- 검증 -------------------------------------------------
 // validateInput은 입력 데이터가 유효한지 검증합니다
 func (m *MACD) validateInput(prices []PriceData) error {
-	if len(prices) == 0 {
-		return &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("가격 데이터가 비어있습니다"),
-		}
+	switch {
+	case m.ShortPeriod <= 0, m.LongPeriod <= 0, m.SignalPeriod <= 0:
+		return &ValidationError{Field: "period", Err: fmt.Errorf("periods must be > 0")}
+	case m.ShortPeriod >= m.LongPeriod:
+		return &ValidationError{Field: "period", Err: fmt.Errorf("ShortPeriod must be < LongPeriod")}
 	}
 
-	minPeriod := m.LongPeriod + m.SignalPeriod - 1
-	if len(prices) < minPeriod {
+	need := (m.LongPeriod - 1) + m.SignalPeriod
+	if len(prices) < need {
 		return &ValidationError{
 			Field: "prices",
-			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d, 현재: %d", minPeriod, len(prices)),
+			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d, 현재: %d", need, len(prices)),
 		}
 	}
-
 	return nil
 }
 
 ```
-## internal/indicator/sar.go
+## internal/indicator/rsi.go
 ```go
+// internal/indicator/rsi.go
 package indicator
 
 import (
@@ -3365,120 +3423,291 @@ import (
 	"time"
 )
 
-// SARResult는 Parabolic SAR 지표 계산 결과입니다
-type SARResult struct {
-	SAR       float64   // SAR 값
-	IsLong    bool      // 현재 추세가 상승인지 여부
+// RSIResult는 RSI 지표 계산 결과
+type RSIResult struct {
+	Value     float64   // RSI 값 (0–100, 계산 불가 구간은 math.NaN())
+	AvgGain   float64   // 평균 이득
+	AvgLoss   float64   // 평균 손실
 	Timestamp time.Time // 계산 시점
 }
 
-// GetTimestamp는 결과의 타임스탬프를 반환합니다 (Result 인터페이스 구현)
-func (r SARResult) GetTimestamp() time.Time {
-	return r.Timestamp
-}
+// GetTimestamp는 결과의 타임스탬프를 반환
+func (r RSIResult) GetTimestamp() time.Time { return r.Timestamp }
 
-// SAR은 Parabolic SAR 지표를 구현합니다
-type SAR struct {
+// RSI는 Relative Strength Index 지표를 구현
+type RSI struct {
 	BaseIndicator
-	AccelerationInitial float64 // 초기 가속도
-	AccelerationMax     float64 // 최대 가속도
+	Period int // RSI 계산 기간
 }
 
-// NewSAR는 새로운 Parabolic SAR 지표 인스턴스를 생성합니다
-func NewSAR(accelerationInitial, accelerationMax float64) *SAR {
-	return &SAR{
+// NewRSI는 새로운 RSI 지표 인스턴스를 생성
+func NewRSI(period int) *RSI {
+	return &RSI{
 		BaseIndicator: BaseIndicator{
-			Name: fmt.Sprintf("SAR(%.2f,%.2f)", accelerationInitial, accelerationMax),
+			Name: fmt.Sprintf("RSI(%d)", period),
 			Config: map[string]interface{}{
-				"AccelerationInitial": accelerationInitial,
-				"AccelerationMax":     accelerationMax,
+				"Period": period,
 			},
 		},
-		AccelerationInitial: accelerationInitial,
-		AccelerationMax:     accelerationMax,
+		Period: period,
 	}
 }
 
-// NewDefaultSAR는 기본 설정으로 SAR 인스턴스를 생성합니다
-func NewDefaultSAR() *SAR {
-	return NewSAR(0.02, 0.2)
+// Calculate는 주어진 가격 데이터에 대해 RSI를 계산
+func (r *RSI) Calculate(prices []PriceData) ([]Result, error) {
+	if err := r.validateInput(prices); err != nil {
+		return nil, err
+	}
+
+	p := r.Period
+	results := make([]Result, len(prices))
+
+	// ---------- 1. 첫 p 개의 변동 Δ 합산 (SMA) ----------------------------
+	sumGain, sumLoss := 0.0, 0.0
+	for i := 1; i <= p; i++ { // i <= p  ⬅ off-by-one 수정
+		delta := prices[i].Close - prices[i-1].Close
+		if delta > 0 {
+			sumGain += delta
+		} else {
+			sumLoss += -delta
+		}
+	}
+	avgGain, avgLoss := sumGain/float64(p), sumLoss/float64(p)
+	results[p] = toRSI(avgGain, avgLoss, prices[p].Time)
+
+	// ---------- 2. 이후 구간 Wilder EMA 방식 ----------------------------
+	for i := p + 1; i < len(prices); i++ {
+		delta := prices[i].Close - prices[i-1].Close
+		gain, loss := 0.0, 0.0
+		if delta > 0 {
+			gain = delta
+		} else {
+			loss = -delta
+		}
+
+		avgGain = (avgGain*float64(p-1) + gain) / float64(p)
+		avgLoss = (avgLoss*float64(p-1) + loss) / float64(p)
+		results[i] = toRSI(avgGain, avgLoss, prices[i].Time)
+	}
+
+	// ---------- 3. 앞 구간(NaN) 표시 ------------------------------------
+	for i := 0; i < p; i++ {
+		results[i] = RSIResult{
+			Value:     math.NaN(),
+			AvgGain:   math.NaN(),
+			AvgLoss:   math.NaN(),
+			Timestamp: prices[i].Time,
+		}
+	}
+	return results, nil
 }
 
-// Calculate는 주어진 가격 데이터에 대해 Parabolic SAR을 계산합니다
+// --- 유틸 ---------------------------------------------------------------
+
+func toRSI(avgGain, avgLoss float64, ts time.Time) RSIResult {
+	var rsi float64
+	switch {
+	case avgGain == 0 && avgLoss == 0:
+		rsi = 50 // 완전 횡보
+	case avgLoss == 0:
+		rsi = 100
+	default:
+		rs := avgGain / avgLoss
+		rsi = 100 - 100/(1+rs)
+	}
+	return RSIResult{Value: rsi, AvgGain: avgGain, AvgLoss: avgLoss, Timestamp: ts}
+}
+
+func (r *RSI) validateInput(prices []PriceData) error {
+	if r.Period <= 0 {
+		return &ValidationError{Field: "period", Err: fmt.Errorf("period must be > 0")}
+	}
+	if len(prices) == 0 {
+		return &ValidationError{Field: "prices", Err: fmt.Errorf("가격 데이터가 비어있습니다")}
+	}
+	if len(prices) <= r.Period {
+		return &ValidationError{
+			Field: "prices",
+			Err:   fmt.Errorf("가격 데이터가 부족합니다. 필요: %d+1, 현재: %d", r.Period, len(prices)),
+		}
+	}
+	return nil
+}
+
+```
+## internal/indicator/sar.go
+```go
+// internal/indicator/sar.go
+package indicator
+
+import (
+	"fmt"
+	"math"
+	"time"
+)
+
+/* -------------------- 결과 타입 -------------------- */
+
+// SARResult 는 Parabolic SAR 한 개 지점의 계산 결과
+type SARResult struct {
+	SAR       float64   // SAR 값
+	IsLong    bool      // 현재 상승 추세 여부
+	Timestamp time.Time // 캔들 시각
+}
+
+func (r SARResult) GetTimestamp() time.Time { return r.Timestamp }
+
+/* -------------------- 본체 -------------------- */
+
+// SAR 은 Parabolic SAR 지표를 구현
+type SAR struct {
+	BaseIndicator
+	AccelerationInitial float64 // AF(가속도) 시작값
+	AccelerationMax     float64 // AF 최대값
+}
+
+// 새 인스턴스
+func NewSAR(step, max float64) *SAR {
+	return &SAR{
+		BaseIndicator: BaseIndicator{
+			Name: fmt.Sprintf("SAR(%.2f,%.2f)", step, max),
+			Config: map[string]interface{}{
+				"AccelerationInitial": step,
+				"AccelerationMax":     max,
+			},
+		},
+		AccelerationInitial: step,
+		AccelerationMax:     max,
+	}
+}
+
+// 기본 파라미터(0.02, 0.2)
+func NewDefaultSAR() *SAR { return NewSAR(0.02, 0.2) }
+
+/* -------------------- 핵심 계산 -------------------- */
+
 func (s *SAR) Calculate(prices []PriceData) ([]Result, error) {
 	if err := s.validateInput(prices); err != nil {
 		return nil, err
 	}
 
-	results := make([]Result, len(prices))
-	// 초기값 설정
-	af := s.AccelerationInitial
-	sar := prices[0].Low
-	ep := prices[0].High
-	isLong := true
+	out := make([]Result, len(prices))
 
-	results[0] = SARResult{
-		SAR:       sar,
-		IsLong:    isLong,
-		Timestamp: prices[0].Time,
+	// ---------- ① 초기 추세 및 SAR 결정 ----------
+	isLong := prices[1].Close >= prices[0].Close // 첫 두 캔들로 방향 판정
+	var sar, ep float64
+	if isLong {
+		// TV 방식: 직전 Low 하나만 사용
+		sar = prices[0].Low
+		ep = prices[1].High
+	} else {
+		sar = prices[0].High
+		ep = prices[1].Low
 	}
+	af := s.AccelerationInitial
 
-	// SAR 계산
-	for i := 1; i < len(prices); i++ {
+	// 첫 캔들은 NaN, 두 번째는 계산값
+	out[0] = SARResult{SAR: math.NaN(), IsLong: isLong, Timestamp: prices[0].Time}
+	out[1] = SARResult{SAR: sar, IsLong: isLong, Timestamp: prices[1].Time}
+
+	// ---------- ② 메인 루프 ----------
+	for i := 2; i < len(prices); i++ {
+		prevSAR := sar
+		// 기본 파라볼릭 공식
+		sar = prevSAR + af*(ep-prevSAR)
+
 		if isLong {
-			sar = sar + af*(ep-sar)
+			// 상승일 때: 직전 2개 Low 이하로 clamp
+			sar = s.Min(sar, prices[i-1].Low, prices[i-2].Low)
 
-			// 새로운 고점 발견
+			// 새로운 고점 나오면 EP·AF 갱신
 			if prices[i].High > ep {
 				ep = prices[i].High
 				af = math.Min(af+s.AccelerationInitial, s.AccelerationMax)
 			}
 
-			// 추세 전환 체크
-			if sar > prices[i].Low {
+			// ★ 추세 전환 조건(포함 비교) ★
+			if sar >= prices[i].Low {
+				// 반전 → 하락
 				isLong = false
-				sar = ep
-				ep = prices[i].Low
+				sar = ep           // 반전 시 SAR = 직전 EP
+				ep = prices[i].Low // 새 EP
 				af = s.AccelerationInitial
-			}
-		} else {
-			sar = sar - af*(sar-ep)
 
-			// 새로운 저점 발견
+				// TV와 동일하게 즉시 clamp
+				sar = s.Max(sar, prices[i-1].High, prices[i-2].High)
+			}
+		} else { // 하락 추세
+			// 하락일 때: 직전 2개 High 이상으로 clamp
+			sar = s.Max(sar, prices[i-1].High, prices[i-2].High)
+
 			if prices[i].Low < ep {
 				ep = prices[i].Low
 				af = math.Min(af+s.AccelerationInitial, s.AccelerationMax)
 			}
 
-			// 추세 전환 체크
-			if sar < prices[i].High {
+			if sar <= prices[i].High { // ★ 포함 비교 ★
+				// 반전 → 상승
 				isLong = true
 				sar = ep
 				ep = prices[i].High
 				af = s.AccelerationInitial
+
+				// 즉시 clamp
+				sar = s.Min(sar, prices[i-1].Low, prices[i-2].Low)
 			}
 		}
 
-		results[i] = SARResult{
-			SAR:       sar,
-			IsLong:    isLong,
-			Timestamp: prices[i].Time,
-		}
+		out[i] = SARResult{SAR: sar, IsLong: isLong, Timestamp: prices[i].Time}
 	}
 
-	return results, nil
+	// /* ---------- ③ (선택) TV와 동일하게 한 캔들 우측으로 밀기 ----------
+	//    TradingView 는 t-1 시점에 계산한 SAR 을 t 캔들 밑에 찍는다.
+	//    차트에 그대로 맞추고 싶다면 주석 해제.
+
+	for i := len(out) - 1; i > 0; i-- {
+		out[i] = out[i-1]
+	}
+	out[0] = SARResult{SAR: math.NaN(), IsLong: out[1].(SARResult).IsLong, Timestamp: prices[0].Time}
+	// ------------------------------------------------------------------ */
+
+	return out, nil
 }
 
-// validateInput은 입력 데이터가 유효한지 검증합니다
+/* -------------------- 입력 검증 -------------------- */
+
 func (s *SAR) validateInput(prices []PriceData) error {
-	if len(prices) < 2 {
-		return &ValidationError{
-			Field: "prices",
-			Err:   fmt.Errorf("SAR 계산에는 최소 2개의 가격 데이터가 필요합니다"),
+	switch {
+	case len(prices) < 3:
+		return &ValidationError{Field: "prices", Err: fmt.Errorf("가격 데이터가 최소 3개 필요합니다")}
+	case s.AccelerationInitial <= 0 || s.AccelerationMax <= 0:
+		return &ValidationError{Field: "acceleration", Err: fmt.Errorf("가속도(step/max)는 0보다 커야 합니다")}
+	case s.AccelerationInitial > s.AccelerationMax:
+		return &ValidationError{Field: "acceleration", Err: fmt.Errorf("AccelerationMax는 AccelerationInitial 이상이어야 합니다")}
+	}
+	return nil
+}
+
+/* -------------------- 보조: 다중 min/max -------------------- */
+
+func (SAR) Min(vals ...float64) float64 {
+	m := vals[0]
+	for _, v := range vals[1:] {
+		if v < m {
+			m = v
 		}
 	}
+	return m
+}
 
-	return nil
+func (SAR) Max(vals ...float64) float64 {
+	m := vals[0]
+	for _, v := range vals[1:] {
+		if v > m {
+			m = v
+		}
+	}
+	return m
 }
 
 ```
@@ -4619,7 +4848,8 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 				return false, nil
 			}
 
-			// 반대 방향의 포지션이 있으면 청산 필요
+			// 반대 방향의 포지션이 있을 경우, Signal Reversal 처리
+			// 기존 포지션은 청산하고, 새 포지션 진입은 허용 (true 반환)
 			if m.notifier != nil {
 				m.notifier.SendInfo(fmt.Sprintf("반대 방향 포지션 감지: %s, 수량: %.8f, 방향: %s",
 					symbol, math.Abs(pos.Quantity), pos.PositionSide))
@@ -4662,9 +4892,9 @@ func (m *BinancePositionManager) IsEntryAvailable(ctx context.Context, symbol st
 
 				if cleared {
 					if m.notifier != nil {
-						m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션이 성공적으로 청산되었습니다.", symbol))
+						m.notifier.SendInfo(fmt.Sprintf("✅ %s 포지션이 성공적으로 청산되었습니다. 반대 포지션 진입 준비 완료", symbol))
 					}
-					return true, nil
+					return true, nil // 청산 성공, 새 포지션 진입 허용
 				}
 
 				time.Sleep(m.retryDelay)
@@ -5331,7 +5561,6 @@ import (
 	"fmt"
 	"log"
 	"sync"
-	"time"
 
 	"github.com/assist-by/phoenix/internal/domain"
 	"github.com/assist-by/phoenix/internal/indicator"
@@ -5340,13 +5569,10 @@ import (
 
 // 심볼별 상태를 관리하기 위한 구조체
 type SymbolState struct {
-	PrevMACD       float64                // 이전 MACD 값
-	PrevSignal     float64                // 이전 Signal 값
-	PrevHistogram  float64                // 이전 히스토그램 값
-	LastSignal     domain.SignalInterface // 마지막 발생 시그널
-	PendingSignal  domain.SignalType      // 대기중인 시그널 타입
-	WaitedCandles  int                    // 대기한 캔들 수
-	MaxWaitCandles int                    // 최대 대기 캔들 수
+	PrevMACD      float64                // 이전 MACD 값
+	PrevSignal    float64                // 이전 Signal 값
+	PrevHistogram float64                // 이전 히스토그램 값
+	LastSignal    domain.SignalInterface // 마지막 발생 시그널
 }
 
 // MACDSAREMAStrategy는 MACD + SAR + EMA 전략을 구현합니다
@@ -5356,10 +5582,9 @@ type MACDSAREMAStrategy struct {
 	macdIndicator *indicator.MACD // MACD 지표
 	sarIndicator  *indicator.SAR  // SAR 지표
 
-	stopLossPct    float64 // 손절 비율
-	takeProfitPct  float64 // 익절 비율
-	minHistogram   float64 // MACD 히스토그램 최소값 (기본값: 0.00005)
-	maxWaitCandles int     // 최대 대기 캔들 수 (기본값: 5)
+	stopLossPct   float64 // 손절 비율
+	takeProfitPct float64 // 익절 비율
+	minHistogram  float64 // MACD 히스토그램 최소값 (기본값: 0.00005)
 
 	states map[string]*SymbolState
 	mu     sync.RWMutex
@@ -5371,8 +5596,7 @@ func NewStrategy(config map[string]interface{}) (strategy.Strategy, error) {
 	emaLength := 200
 	stopLossPct := 0.02
 	takeProfitPct := 0.04
-	minHistogram := 0.00005
-	maxWaitCandles := 5
+	minHistogram := 0.005
 
 	// 설정에서 값 로드
 	if config != nil {
@@ -5388,9 +5612,6 @@ func NewStrategy(config map[string]interface{}) (strategy.Strategy, error) {
 		if val, ok := config["minHistogram"].(float64); ok {
 			minHistogram = val
 		}
-		if val, ok := config["maxWaitCandles"].(int); ok {
-			maxWaitCandles = val
-		}
 	}
 
 	// 필요한 지표 인스턴스 생성
@@ -5404,14 +5625,13 @@ func NewStrategy(config map[string]interface{}) (strategy.Strategy, error) {
 			Description: "MACD, Parabolic SAR, 200 EMA를 조합한 트렌드 팔로잉 전략",
 			Config:      config,
 		},
-		emaIndicator:   emaIndicator,
-		macdIndicator:  macdIndicator,
-		sarIndicator:   sarIndicator,
-		stopLossPct:    stopLossPct,
-		takeProfitPct:  takeProfitPct,
-		minHistogram:   minHistogram,
-		maxWaitCandles: maxWaitCandles,
-		states:         make(map[string]*SymbolState),
+		emaIndicator:  emaIndicator,
+		macdIndicator: macdIndicator,
+		sarIndicator:  sarIndicator,
+		stopLossPct:   stopLossPct,
+		takeProfitPct: takeProfitPct,
+		minHistogram:  minHistogram,
+		states:        make(map[string]*SymbolState),
 	}
 
 	return s, nil
@@ -5512,20 +5732,7 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		"SARValue":    currentSAR,
 	}
 
-	// 1. 대기 상태 확인 및 업데이트
-	if state.PendingSignal != domain.NoSignal {
-		pendingSignal := s.processPendingState(state, symbol, conditions, currentPrice, currentHistogram, sarBelowCandle, sarAboveCandle, currentSAR)
-		if pendingSignal != nil {
-			// 상태 업데이트
-			state.PrevMACD = currentMACD
-			state.PrevSignal = currentSignal
-			state.PrevHistogram = currentHistogram
-			state.LastSignal = pendingSignal
-			return pendingSignal, nil
-		}
-	}
-
-	// 2. 일반 시그널 조건 확인
+	// 1. 일반 시그널 조건 확인
 	// Long 시그널
 	if isAboveEMA && // EMA 200 위
 		macdCross == 1 && // MACD 상향 돌파
@@ -5536,8 +5743,9 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		stopLoss = currentSAR                                 // SAR 기반 손절가
 		takeProfit = currentPrice + (currentPrice - stopLoss) // 1:1 비율
 
-		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
-			symbol, currentPrice, currentEMA, currentSAR)
+		log.Printf("[%s] Long 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f (시간: %s)",
+			symbol, currentPrice, currentEMA, currentSAR,
+			lastCandle.Time.Format("2006-01-02 15:04:05"))
 	}
 
 	// Short 시그널
@@ -5550,25 +5758,9 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		stopLoss = currentSAR                                 // SAR 기반 손절가
 		takeProfit = currentPrice - (stopLoss - currentPrice) // 1:1 비율
 
-		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f",
-			symbol, currentPrice, currentEMA, currentSAR)
-	}
-
-	// 3. 새로운 대기 상태 설정 (일반 시그널이 아닌 경우)
-	if signalType == domain.NoSignal {
-		// MACD 상향돌파 + EMA 위 + SAR 캔들 아래가 아닌 경우 -> 롱 대기 상태
-		if isAboveEMA && macdCross == 1 && !sarBelowCandle && currentHistogram > 0 {
-			state.PendingSignal = domain.PendingLong
-			state.WaitedCandles = 0
-			log.Printf("[%s] Long 대기 상태 시작: MACD 상향돌파, SAR 반전 대기", symbol)
-		}
-
-		// MACD 하향돌파 + EMA 아래 + SAR이 캔들 위가 아닌 경우 → 숏 대기 상태
-		if !isAboveEMA && macdCross == -1 && !sarAboveCandle && currentHistogram < 0 {
-			state.PendingSignal = domain.PendingShort
-			state.WaitedCandles = 0
-			log.Printf("[%s] Short 대기 상태 시작: MACD 하향돌파, SAR 반전 대기", symbol)
-		}
+		log.Printf("[%s] Short 시그널 감지: 가격=%.2f, EMA200=%.2f, SAR=%.2f (시간: %s)",
+			symbol, currentPrice, currentEMA, currentSAR,
+			lastCandle.Time.Format("2006-01-02 15:04:05"))
 	}
 
 	// 상태 업데이트
@@ -5616,22 +5808,12 @@ func (s *MACDSAREMAStrategy) getSymbolState(symbol string) *SymbolState {
 
 	if !exists {
 		s.mu.Lock()
-		state = &SymbolState{
-			PendingSignal:  domain.NoSignal,
-			WaitedCandles:  0,
-			MaxWaitCandles: s.maxWaitCandles,
-		}
+		state = &SymbolState{}
 		s.states[symbol] = state
 		s.mu.Unlock()
 	}
 
 	return state
-}
-
-// resetPendingState는 심볼의 대기 상태를 초기화합니다
-func (s *MACDSAREMAStrategy) resetPendingState(state *SymbolState) {
-	state.PendingSignal = domain.NoSignal
-	state.WaitedCandles = 0
 }
 
 // checkMACDCross는 MACD 크로스를 확인합니다
@@ -5641,121 +5823,6 @@ func (s *MACDSAREMAStrategy) checkMACDCross(currentMACD, currentSignal, prevMACD
 		return 1 // 상향돌파
 	}
 	if prevMACD >= prevSignal && currentMACD < currentSignal {
-		return -1 // 하향돌파
-	}
-	return 0 // 크로스 없음
-}
-
-// processPendingState는 대기 상태를 처리하고 시그널을 생성합니다
-func (s *MACDSAREMAStrategy) processPendingState(
-	state *SymbolState,
-	symbol string,
-	conditions map[string]interface{},
-	currentPrice float64,
-	currentHistogram float64,
-	sarBelowCandle bool,
-	sarAboveCandle bool,
-	currentSAR float64,
-) domain.SignalInterface {
-	// 캔들 카운트 증가
-	state.WaitedCandles++
-
-	// 최대 대기 시간 초과 체크
-	if state.WaitedCandles > state.MaxWaitCandles {
-		log.Printf("[%s] 대기 상태 취소: 최대 대기 캔들 수 (%d) 초과", symbol, state.MaxWaitCandles)
-		s.resetPendingState(state)
-		return nil
-	}
-
-	var resultSignal domain.SignalInterface = nil
-	var stopLoss, takeProfit float64
-	var resultType domain.SignalType = domain.NoSignal
-
-	// Long 대기 상태 처리
-	if state.PendingSignal == domain.PendingLong {
-		// 히스토그램이 음수로 바뀌면 취소(추세 역전)
-		if currentHistogram < 0 && state.PrevHistogram > 0 {
-			log.Printf("[%s] Long 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f)",
-				symbol, state.PrevHistogram, currentHistogram)
-			s.resetPendingState(state)
-			return nil
-		}
-
-		// SAR가 캔들 아래로 이동하면 롱 시그널 생성
-		if sarBelowCandle {
-			resultType = domain.Long
-			stopLoss = currentSAR
-			takeProfit = currentPrice + (currentPrice - stopLoss)
-
-			log.Printf("[%s] Long 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
-				symbol, state.WaitedCandles)
-
-			s.resetPendingState(state)
-			// return resultSignal
-		}
-	}
-
-	// Short 대기 상태 처리
-	if state.PendingSignal == domain.PendingShort {
-		// 히스토그램이 양수로 바뀌면 취소 (추세 역전)
-		if currentHistogram > 0 && state.PrevHistogram < 0 {
-			log.Printf("[%s] Short 대기 상태 취소: 히스토그램 부호 변경 (%.5f → %.5f)",
-				symbol, state.PrevHistogram, currentHistogram)
-			s.resetPendingState(state)
-			return nil
-		}
-
-		// SAR이 캔들 위로 이동하면 숏 시그널 생성
-		if sarAboveCandle {
-			resultType = domain.Short
-			stopLoss = currentSAR
-			takeProfit = currentPrice - (stopLoss - currentPrice)
-
-			log.Printf("[%s] Short 대기 상태 → 진입 시그널 전환: %d캔들 대기 후 SAR 반전 확인",
-				symbol, state.WaitedCandles)
-
-			s.resetPendingState(state)
-			// return resultSignal
-		}
-	}
-
-	// 최종 시그널 생성
-	if resultType != domain.NoSignal {
-		macdSignal := &MACDSAREMASignal{
-			BaseSignal: domain.NewBaseSignal(
-				resultType,
-				symbol,
-				currentPrice,
-				time.Now(), // or use a proper timestamp
-				stopLoss,
-				takeProfit,
-			),
-			// 특화 필드 설정
-			EMAValue:    conditions["EMAValue"].(float64),
-			EMAAbove:    conditions["EMALong"].(bool),
-			MACDValue:   conditions["MACDValue"].(float64),
-			SignalValue: conditions["SignalValue"].(float64),
-			SARValue:    conditions["SARValue"].(float64),
-			SARBelow:    conditions["SARLong"].(bool),
-			MACDCross:   getMACDCrossValue(conditions),
-			Histogram:   conditions["MACDValue"].(float64) - conditions["SignalValue"].(float64),
-		}
-
-		// 조건 정보 설정
-		for k, v := range conditions {
-			macdSignal.SetCondition(k, v)
-		}
-
-		resultSignal = macdSignal
-	}
-
-	return resultSignal
-}
-
-func getMACDCrossValue(conditions map[string]interface{}) int {
-	if conditions["MACDLong"].(bool) {
-		return 1 // 상향돌파
-	} else if conditions["MACDShort"].(bool) {
 		return -1 // 하향돌파
 	}
 	return 0 // 크로스 없음

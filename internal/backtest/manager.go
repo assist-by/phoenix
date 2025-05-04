@@ -8,6 +8,7 @@ import (
 
 	"github.com/assist-by/phoenix/internal/config"
 	"github.com/assist-by/phoenix/internal/domain"
+	p "github.com/assist-by/phoenix/internal/position"
 )
 
 // Manager는 백테스트용 포지션 관리자입니다
@@ -57,24 +58,47 @@ func (m *Manager) OpenPosition(signal domain.SignalInterface, candle domain.Cand
 	}
 
 	// 포지션 사이드 결정
-	var side domain.PositionSide
-	if signalType == domain.Long || signalType == domain.PendingLong {
-		side = domain.LongPosition
-	} else {
-		side = domain.ShortPosition
-	}
+	side := p.GetPositionSideFromSignal(signalType)
 
 	// 진입가 결정 (슬리피지 적용)
 	entryPrice := signal.GetPrice()
-	if side == domain.LongPosition {
+	orderSide := p.GetOrderSideForEntry(side)
+	if orderSide == domain.Buy { // Long 진입 = Buy
 		entryPrice *= (1 + m.SlippagePct/100)
-	} else {
+	} else { // Short 진입 = Sell
 		entryPrice *= (1 - m.SlippagePct/100)
 	}
 
+	var stepSize, tickSize float64
+	var pricePrecision int
+	if info, exists := m.SymbolInfos[symbol]; exists {
+		stepSize = info.StepSize
+		tickSize = info.TickSize
+		pricePrecision = info.PricePrecision
+	} else {
+		// 기본값 설정
+		stepSize = 0.001
+		tickSize = 0.01
+		pricePrecision = 2
+	}
+
 	// 포지션 크기 계산
-	positionSize := m.calculatePositionSize(m.Account.Balance, m.Rules.MaxRiskPerTrade, entryPrice, signal.GetStopLoss())
-	quantity := positionSize / entryPrice
+	sizingConfig := p.SizingConfig{
+		AccountBalance:   m.Account.Balance,
+		AvailableBalance: m.Account.Balance, // 백테스트에서는 동일한 값 사용
+		Leverage:         m.Leverage,
+		MaxAllocation:    m.Rules.MaxRiskPerTrade / 100, // %를 소수점으로 변환
+		StepSize:         stepSize,                      // 심볼 정보에서 가져오는 값
+		TickSize:         tickSize,                      // 심볼 정보에서 가져오는 값
+		MinNotional:      0,                             // 백테스트에서는 최소값 제약 없음
+		MaintMarginRate:  0.01,                          // 기본값 적용 또는 백테스트 설정에서 가져오기
+	}
+
+	posResult, err := p.CalculatePositionSize(entryPrice, sizingConfig)
+	if err != nil {
+		return nil, fmt.Errorf("포지션 크기 계산 실패: %w", err)
+	}
+	quantity := posResult.Quantity
 
 	// 심볼 정보가 있다면 최소 단위에 맞게 조정
 	if info, exists := m.SymbolInfos[symbol]; exists {
@@ -82,8 +106,8 @@ func (m *Manager) OpenPosition(signal domain.SignalInterface, candle domain.Cand
 	}
 
 	// 포지션 생성에 필요한 자금이 충분한지 확인
-	requiredMargin := (positionSize / float64(m.Leverage))
-	entryFee := positionSize * m.TakerFee
+	requiredMargin := (posResult.PositionValue / float64(m.Leverage))
+	entryFee := posResult.PositionValue * m.TakerFee
 
 	if m.Account.Balance < (requiredMargin + entryFee) {
 		return nil, fmt.Errorf("잔고 부족: 필요 %.2f, 보유 %.2f", requiredMargin+entryFee, m.Account.Balance)
@@ -92,15 +116,19 @@ func (m *Manager) OpenPosition(signal domain.SignalInterface, candle domain.Cand
 	// 수수료 차감
 	m.Account.Balance -= entryFee
 
+	// TP/SL 가격 조정
+	adjustedStopLoss := domain.AdjustPrice(signal.GetStopLoss(), tickSize, pricePrecision)
+	adjustedTakeProfit := domain.AdjustPrice(signal.GetTakeProfit(), tickSize, pricePrecision)
+
 	// 새 포지션 생성
 	position := &Position{
 		Symbol:     symbol,
 		Side:       side,
 		EntryPrice: entryPrice,
-		Quantity:   quantity,
+		Quantity:   math.Abs(quantity),
 		EntryTime:  candle.OpenTime,
-		StopLoss:   signal.GetStopLoss(),
-		TakeProfit: signal.GetTakeProfit(),
+		StopLoss:   adjustedStopLoss,
+		TakeProfit: adjustedTakeProfit,
 		Status:     Open,
 		ExitReason: NoExit,
 	}
@@ -120,7 +148,6 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	// 청산가가 유효한지 확인 (0이나 음수인 경우 처리)
 	if closePrice <= 0 {
 		log.Printf("경고: 유효하지 않은 청산가 (%.2f), 현재 가격으로 대체합니다", closePrice)
-		// 유효한 마지막 가격으로 대체 (이전 함수에서 전달받아야 함)
 		return fmt.Errorf("유효하지 않은 청산가: %.2f", closePrice)
 	}
 
@@ -141,9 +168,10 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	}
 
 	// 청산가 조정 (슬리피지 적용)
-	if position.Side == domain.LongPosition {
+	exitSide := p.GetOrderSideForExit(position.Side)
+	if exitSide == domain.Sell { // Long 청산 = Sell
 		closePrice *= (1 - m.SlippagePct/100)
-	} else {
+	} else { // Short 청산 = Buy
 		closePrice *= (1 + m.SlippagePct/100)
 	}
 
@@ -153,6 +181,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	// 수수료 계산
 	closeFee := positionValue * m.TakerFee
 
+	log.Printf("DEBUG: 청산 직전 포지션 정보 - 심볼: %s, 사이드: %s, 수량: %.8f, 진입가: %.2f, 청산가: %.2f",
+		position.Symbol, position.Side, position.Quantity, position.EntryPrice, closePrice)
+
 	// PnL 계산
 	var pnl float64
 	if position.Side == domain.LongPosition {
@@ -160,6 +191,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 	} else {
 		pnl = (position.EntryPrice - closePrice) * position.Quantity
 	}
+
+	log.Printf("DEBUG: PnL 계산 결과 - PnL: %.2f, 사이드: %s, 진입가: %.2f, 청산가: %.2f, 수량: %.8f",
+		pnl, position.Side, position.EntryPrice, closePrice, position.Quantity)
 
 	// 수수료 차감
 	pnl -= closeFee
@@ -169,6 +203,9 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 
 	// 포지션 초기 가치 계산 (레버리지 적용 전)
 	initialValue := position.EntryPrice * position.Quantity
+
+	log.Printf("DEBUG: 초기 포지션 가치 - 가치: %.2f, 진입가: %.2f, 수량: %.8f",
+		initialValue, position.EntryPrice, position.Quantity)
 
 	// PnL 퍼센트 계산 전에 초기 가치가 0인지 체크 (0으로 나누기 방지)
 	var pnlPercentage float64
@@ -205,8 +242,8 @@ func (m *Manager) ClosePosition(position *Position, closePrice float64, closeTim
 }
 
 // UpdatePositions은 새 캔들 데이터로 모든 포지션을 업데이트합니다
-func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInterface) []*Position {
-	symbol := candle.Symbol
+func (m *Manager) UpdatePositions(currentCandle domain.Candle, signal domain.SignalInterface) []*Position {
+	symbol := currentCandle.Symbol
 	closedPositions := make([]*Position, 0)
 
 	// 현재 열린 포지션 중 해당 심볼에 대한 포지션 확인
@@ -221,28 +258,35 @@ func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInte
 
 		if position.Side == domain.LongPosition {
 			// 롱 포지션: 고가가 TP 이상이면 TP 도달, 저가가 SL 이하면 SL 도달
-			if candle.High >= position.TakeProfit {
+			if currentCandle.High >= position.TakeProfit {
 				tpHit = true
 			}
-			if candle.Low <= position.StopLoss {
+			if currentCandle.Low <= position.StopLoss {
 				slHit = true
 			}
 		} else {
 			// 숏 포지션: 저가가 TP 이하면 TP 도달, 고가가 SL 이상이면 SL 도달
-			if candle.Low <= position.TakeProfit {
+			if currentCandle.Low <= position.TakeProfit {
 				tpHit = true
 			}
-			if candle.High >= position.StopLoss {
+			if currentCandle.High >= position.StopLoss {
 				slHit = true
 			}
 		}
 
 		// 2. 시그널 반전 여부 확인
 		signalReversal := false
+		var reversalSignalType domain.SignalType = domain.NoSignal
+
 		if signal != nil && signal.GetType() != domain.NoSignal {
-			if (position.Side == domain.LongPosition && signal.GetType() == domain.Short) ||
-				(position.Side == domain.ShortPosition && signal.GetType() == domain.Long) {
+			currentPositionSide := position.Side
+			newPositionSide := p.GetPositionSideFromSignal(signal.GetType())
+
+			if currentPositionSide != domain.BothPosition && // 헤지모드가 아닌 경우
+				newPositionSide != domain.BothPosition && // 유효한 시그널인 경우
+				currentPositionSide != newPositionSide { // 방향이 다른 경우
 				signalReversal = true
+				reversalSignalType = signal.GetType()
 			}
 		}
 
@@ -250,20 +294,32 @@ func (m *Manager) UpdatePositions(candle domain.Candle, signal domain.SignalInte
 		// 동일 캔들에서 TP와 SL 모두 도달하면 SL 우선 처리 (Rules.SlPriority 설정에 따라)
 		if slHit && (m.Rules.SlPriority || !tpHit) {
 			// SL 청산 (저점 또는 고점이 아닌 SL 가격으로 청산)
-			m.ClosePosition(position, position.StopLoss, candle.CloseTime, StopLossHit)
+			m.ClosePosition(position, position.StopLoss, currentCandle.CloseTime, StopLossHit)
 			closedPositions = append(closedPositions, position)
 		} else if tpHit {
 			// TP 청산 (TP 가격으로 청산)
-			m.ClosePosition(position, position.TakeProfit, candle.CloseTime, TakeProfitHit)
+			m.ClosePosition(position, position.TakeProfit, currentCandle.CloseTime, TakeProfitHit)
 			closedPositions = append(closedPositions, position)
 		} else if signalReversal {
 			// 시그널 반전으로 청산 (현재 캔들 종가로 청산)
-			if err := m.ClosePosition(position, candle.Close, candle.CloseTime, SignalReversal); err != nil {
+			if err := m.ClosePosition(position, currentCandle.Close, currentCandle.CloseTime, SignalReversal); err != nil {
 				// 오류 처리 (예: 청산가가 유효하지 않은 경우)
 				log.Printf("시그널 반전으로 청산 실패 (%s): %v", symbol, err)
 				continue
 			}
 			closedPositions = append(closedPositions, position)
+
+			// 시그널 반전 후 즉시 신규 포지션 진입
+			if reversalSignalType != domain.NoSignal && signal != nil {
+				// 새로운 포지션 생성
+				_, err := m.OpenPosition(signal, currentCandle)
+				if err != nil {
+					log.Printf("시그널 반전 후 새 포지션 진입 실패 (%s): %v", symbol, err)
+				} else {
+					log.Printf("시그널 반전 후 즉시 %s %s 포지션 진입 @ %.2f",
+						symbol, signal.GetType().String(), signal.GetPrice())
+				}
+			}
 		}
 	}
 
@@ -377,31 +433,6 @@ func (m *Manager) GetBacktestResult(startTime, endTime time.Time, symbol string,
 		Symbol:           symbol,
 		Interval:         interval,
 	}
-}
-
-// calculatePositionSize는 리스크 기반으로 포지션 크기를 계산합니다
-func (m *Manager) calculatePositionSize(balance float64, riskPercent float64, entryPrice, stopLoss float64) float64 {
-	// 해당 거래에 할당할 자금
-	riskAmount := balance * (riskPercent / 100)
-
-	// 손절가와 진입가의 차이 (%)
-	var priceDiffPct float64
-	if entryPrice > stopLoss { // 롱 포지션
-		priceDiffPct = (entryPrice - stopLoss) / entryPrice * 100
-	} else { // 숏 포지션
-		priceDiffPct = (stopLoss - entryPrice) / entryPrice * 100
-	}
-
-	// 레버리지 고려
-	priceDiffPct = priceDiffPct * float64(m.Leverage)
-
-	// 리스크 기반 포지션 크기
-	if priceDiffPct > 0 {
-		return (riskAmount / priceDiffPct) * 100
-	}
-
-	// 기본값: 잔고의 1%
-	return balance * 0.01
 }
 
 // convertTradesToResultTrades는 내부 포지션 기록을 결과용 Trade 구조체로 변환합니다
