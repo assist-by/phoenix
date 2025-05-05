@@ -20,6 +20,7 @@ import (
 	pBinance "github.com/assist-by/phoenix/internal/position/binance"
 	"github.com/assist-by/phoenix/internal/scheduler"
 	"github.com/assist-by/phoenix/internal/strategy"
+	"github.com/assist-by/phoenix/internal/strategy/doublersi"
 	"github.com/assist-by/phoenix/internal/strategy/macdsarema"
 )
 
@@ -113,20 +114,12 @@ func main() {
 	// 전략 레지스트리 생성
 	strategyRegistry := strategy.NewRegistry()
 
-	// MACD+SAR+EMA 전략 등록
+	// 전략 등록
 	macdsarema.RegisterStrategy(strategyRegistry)
+	doublersi.RegisterStrategy(strategyRegistry)
 
-	// 전략 설정
-	strategyConfig := map[string]interface{}{
-		"emaLength":      200,
-		"stopLossPct":    0.02,
-		"takeProfitPct":  0.04,
-		"minHistogram":   0.00005,
-		"maxWaitCandles": 3,
-	}
-
-	// 전략 인스턴스 생성
-	tradingStrategy, err := strategyRegistry.Create("MACD+SAR+EMA", strategyConfig)
+	// 설정에 따라 전략 생성
+	tradingStrategy, err := strategy.CreateStrategyFromConfig(strategyRegistry, cfg)
 	if err != nil {
 		log.Fatalf("전략 생성 실패: %v", err)
 	}

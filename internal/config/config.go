@@ -44,7 +44,8 @@ type Config struct {
 
 	// 거래 설정
 	Trading struct {
-		Leverage int `envconfig:"LEVERAGE" default:"5" validate:"min=1,max=100"`
+		Leverage int    `envconfig:"LEVERAGE" default:"5" validate:"min=1,max=100"`
+		Strategy string `envconfig:"STRATEGY" default:"MACD+SAR+EMA"`
 	}
 
 	// 백테스트 설정 추가
