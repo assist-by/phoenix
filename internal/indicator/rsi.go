@@ -21,19 +21,22 @@ func (r RSIResult) GetTimestamp() time.Time { return r.Timestamp }
 // RSI는 Relative Strength Index 지표를 구현
 type RSI struct {
 	BaseIndicator
-	Period int // RSI 계산 기간
+	Period  int  // RSI 계산 기간
+	FillNaN bool // NaN 값을 채울지 여부
 }
 
 // NewRSI는 새로운 RSI 지표 인스턴스를 생성
-func NewRSI(period int) *RSI {
+func NewRSI(period int, fillNaN bool) *RSI {
 	return &RSI{
 		BaseIndicator: BaseIndicator{
 			Name: fmt.Sprintf("RSI(%d)", period),
 			Config: map[string]interface{}{
-				"Period": period,
+				"Period":  period,
+				"FillNaN": fillNaN,
 			},
 		},
-		Period: period,
+		Period:  period,
+		FillNaN: fillNaN,
 	}
 }
 
@@ -43,63 +46,99 @@ func (r *RSI) Calculate(prices []PriceData) ([]Result, error) {
 		return nil, err
 	}
 
-	p := r.Period
 	results := make([]Result, len(prices))
 
-	// ---------- 1. 첫 p 개의 변동 Δ 합산 (SMA) ----------------------------
-	sumGain, sumLoss := 0.0, 0.0
-	for i := 1; i <= p; i++ { // i <= p  ⬅ off-by-one 수정
-		delta := prices[i].Close - prices[i-1].Close
-		if delta > 0 {
-			sumGain += delta
+	// 첫 요소에 대한 NaN 설정 (차분을 구할 수 없음)
+	results[0] = RSIResult{
+		Value:     math.NaN(),
+		AvgGain:   math.NaN(),
+		AvgLoss:   math.NaN(),
+		Timestamp: prices[0].Time,
+	}
+
+	// 상승/하락 분리를 위한 PriceData 생성
+	gainData := make([]PriceData, len(prices)-1)
+	lossData := make([]PriceData, len(prices)-1)
+
+	for i := 1; i < len(prices); i++ {
+		diff := prices[i].Close - prices[i-1].Close
+		idx := i - 1
+
+		// 상승/하락 분리
+		if diff > 0 {
+			gainData[idx] = PriceData{
+				Time:  prices[i].Time,
+				Close: diff,
+			}
+			lossData[idx] = PriceData{
+				Time:  prices[i].Time,
+				Close: 0,
+			}
 		} else {
-			sumLoss += -delta
+			gainData[idx] = PriceData{
+				Time:  prices[i].Time,
+				Close: 0,
+			}
+			lossData[idx] = PriceData{
+				Time:  prices[i].Time,
+				Close: -diff,
+			}
 		}
 	}
-	avgGain, avgLoss := sumGain/float64(p), sumLoss/float64(p)
-	results[p] = toRSI(avgGain, avgLoss, prices[p].Time)
 
-	// ---------- 2. 이후 구간 Wilder EMA 방식 ----------------------------
-	for i := p + 1; i < len(prices); i++ {
-		delta := prices[i].Close - prices[i-1].Close
-		gain, loss := 0.0, 0.0
-		if delta > 0 {
-			gain = delta
-		} else {
-			loss = -delta
-		}
+	// Wilder 방식의 EMA 계산 (alpha=1/period)
+	gainEMA := NewWilderEMA(r.Period)
+	lossEMA := NewWilderEMA(r.Period)
 
-		avgGain = (avgGain*float64(p-1) + gain) / float64(p)
-		avgLoss = (avgLoss*float64(p-1) + loss) / float64(p)
-		results[i] = toRSI(avgGain, avgLoss, prices[i].Time)
+	// fillna 설정
+	minPeriods := 0
+	if !r.FillNaN {
+		minPeriods = r.Period
 	}
 
-	// ---------- 3. 앞 구간(NaN) 표시 ------------------------------------
-	for i := 0; i < p; i++ {
-		results[i] = RSIResult{
-			Value:     math.NaN(),
-			AvgGain:   math.NaN(),
-			AvgLoss:   math.NaN(),
-			Timestamp: prices[i].Time,
+	// 설정 업데이트
+	gainEMA.Config["min_periods"] = minPeriods
+	lossEMA.Config["min_periods"] = minPeriods
+
+	// EMA 계산 수행
+	gainResults, _ := gainEMA.Calculate(gainData)
+	lossResults, _ := lossEMA.Calculate(lossData)
+
+	// RSI 계산
+	for i := 0; i < len(gainResults); i++ {
+		// 결과 인덱스
+		resultIdx := i + 1
+
+		// EMA 결과에서 값 추출
+		avgGain := gainResults[i].(EMAResult).Value
+		avgLoss := lossResults[i].(EMAResult).Value
+
+		// RSI 값 계산 - Python 방식과 일치
+		var rsi float64
+		switch {
+		case math.IsNaN(avgGain) || math.IsNaN(avgLoss):
+			rsi = math.NaN()
+		case avgLoss == 0:
+			rsi = 100
+		default:
+			rs := avgGain / avgLoss
+			rsi = 100 - 100/(1+rs)
+		}
+
+		// NaN 채우기
+		if r.FillNaN && math.IsNaN(rsi) {
+			rsi = 50
+		}
+
+		results[resultIdx] = RSIResult{
+			Value:     rsi,
+			AvgGain:   avgGain,
+			AvgLoss:   avgLoss,
+			Timestamp: prices[resultIdx].Time,
 		}
 	}
+
 	return results, nil
-}
-
-// --- 유틸 ---------------------------------------------------------------
-
-func toRSI(avgGain, avgLoss float64, ts time.Time) RSIResult {
-	var rsi float64
-	switch {
-	case avgGain == 0 && avgLoss == 0:
-		rsi = 50 // 완전 횡보
-	case avgLoss == 0:
-		rsi = 100
-	default:
-		rs := avgGain / avgLoss
-		rsi = 100 - 100/(1+rs)
-	}
-	return RSIResult{Value: rsi, AvgGain: avgGain, AvgLoss: avgLoss, Timestamp: ts}
 }
 
 func (r *RSI) validateInput(prices []PriceData) error {
