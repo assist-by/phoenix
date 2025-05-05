@@ -52,87 +52,126 @@ func (s *SAR) Calculate(prices []PriceData) ([]Result, error) {
 		return nil, err
 	}
 
-	out := make([]Result, len(prices))
+	n := len(prices)
+	high := make([]float64, n)
+	low := make([]float64, n)
+	close := make([]float64, n)
 
-	// ---------- ① 초기 추세 및 SAR 결정 ----------
-	isLong := prices[1].Close >= prices[0].Close // 첫 두 캔들로 방향 판정
-	var sar, ep float64
-	if isLong {
-		// TV 방식: 직전 Low 하나만 사용
-		sar = prices[0].Low
-		ep = prices[1].High
-	} else {
-		sar = prices[0].High
-		ep = prices[1].Low
+	// PriceData에서 배열 추출
+	for i, price := range prices {
+		high[i] = price.High
+		low[i] = price.Low
+		close[i] = price.Close
 	}
-	af := s.AccelerationInitial
 
-	// 첫 캔들은 NaN, 두 번째는 계산값
-	out[0] = SARResult{SAR: math.NaN(), IsLong: isLong, Timestamp: prices[0].Time}
-	out[1] = SARResult{SAR: sar, IsLong: isLong, Timestamp: prices[1].Time}
+	// 결과 배열 초기화
+	result := make([]Result, n)
 
-	// ---------- ② 메인 루프 ----------
-	for i := 2; i < len(prices); i++ {
-		prevSAR := sar
-		// 기본 파라볼릭 공식
-		sar = prevSAR + af*(ep-prevSAR)
+	// 계산 로직 시작
+	psar := make([]float64, n)
+	psarUp := make([]float64, n)
+	psarDown := make([]float64, n)
 
-		if isLong {
-			// 상승일 때: 직전 2개 Low 이하로 clamp
-			sar = s.Min(sar, prices[i-1].Low, prices[i-2].Low)
+	// 초기값 설정 (첫 두 값은 NaN으로 설정)
+	for i := 0; i < 2; i++ {
+		result[i] = SARResult{
+			SAR:       math.NaN(),
+			IsLong:    false, // 첫 포인트는 추세를 결정할 수 없음
+			Timestamp: prices[i].Time,
+		}
+		psar[i] = close[i]
+		psarUp[i] = math.NaN()
+		psarDown[i] = math.NaN()
+	}
 
-			// 새로운 고점 나오면 EP·AF 갱신
-			if prices[i].High > ep {
-				ep = prices[i].High
-				af = math.Min(af+s.AccelerationInitial, s.AccelerationMax)
+	// 초기 추세 설정 - 두 번째 캔들이 첫 번째보다 높으면 상승 추세
+	upTrend := close[1] > close[0]
+
+	accelerationFactor := s.AccelerationInitial
+	upTrendHigh := high[0]
+	downTrendLow := low[0]
+
+	// 메인 계산 루프
+	for i := 2; i < n; i++ {
+		reversal := false
+		maxHigh := high[i]
+		minLow := low[i]
+
+		if upTrend {
+			// 상승 추세 계산
+			psar[i] = psar[i-1] + (accelerationFactor * (upTrendHigh - psar[i-1]))
+
+			// 반전 체크
+			if minLow < psar[i] {
+				reversal = true
+				psar[i] = upTrendHigh
+				downTrendLow = minLow
+				accelerationFactor = s.AccelerationInitial
+			} else {
+				// 새로운 고점 갱신 시 가속 계수 증가
+				if maxHigh > upTrendHigh {
+					upTrendHigh = maxHigh
+					accelerationFactor = math.Min(accelerationFactor+s.AccelerationInitial, s.AccelerationMax)
+				}
+
+				// 이전 저점으로 SAR 조정 (캔들 두 개)
+				low1 := low[i-1]
+				low2 := low[i-2]
+				if low2 < psar[i] {
+					psar[i] = low2
+				} else if low1 < psar[i] {
+					psar[i] = low1
+				}
 			}
+		} else {
+			// 하락 추세 계산
+			psar[i] = psar[i-1] - (accelerationFactor * (psar[i-1] - downTrendLow))
 
-			// ★ 추세 전환 조건(포함 비교) ★
-			if sar >= prices[i].Low {
-				// 반전 → 하락
-				isLong = false
-				sar = ep           // 반전 시 SAR = 직전 EP
-				ep = prices[i].Low // 새 EP
-				af = s.AccelerationInitial
+			// 반전 체크
+			if maxHigh > psar[i] {
+				reversal = true
+				psar[i] = downTrendLow
+				upTrendHigh = maxHigh
+				accelerationFactor = s.AccelerationInitial
+			} else {
+				// 새로운 저점 갱신 시 가속 계수 증가
+				if minLow < downTrendLow {
+					downTrendLow = minLow
+					accelerationFactor = math.Min(accelerationFactor+s.AccelerationInitial, s.AccelerationMax)
+				}
 
-				// TV와 동일하게 즉시 clamp
-				sar = s.Max(sar, prices[i-1].High, prices[i-2].High)
-			}
-		} else { // 하락 추세
-			// 하락일 때: 직전 2개 High 이상으로 clamp
-			sar = s.Max(sar, prices[i-1].High, prices[i-2].High)
-
-			if prices[i].Low < ep {
-				ep = prices[i].Low
-				af = math.Min(af+s.AccelerationInitial, s.AccelerationMax)
-			}
-
-			if sar <= prices[i].High { // ★ 포함 비교 ★
-				// 반전 → 상승
-				isLong = true
-				sar = ep
-				ep = prices[i].High
-				af = s.AccelerationInitial
-
-				// 즉시 clamp
-				sar = s.Min(sar, prices[i-1].Low, prices[i-2].Low)
+				// 이전 고점으로 SAR 조정 (캔들 두 개)
+				high1 := high[i-1]
+				high2 := high[i-2]
+				if high2 > psar[i] {
+					psar[i] = high2
+				} else if high1 > psar[i] {
+					psar[i] = high1
+				}
 			}
 		}
 
-		out[i] = SARResult{SAR: sar, IsLong: isLong, Timestamp: prices[i].Time}
+		// XOR 연산으로 추세 방향 업데이트
+		upTrend = upTrend != reversal
+
+		// SAR 값 추세 방향에 따라 저장
+		if upTrend {
+			psarUp[i] = psar[i]
+			psarDown[i] = math.NaN()
+		} else {
+			psarDown[i] = psar[i]
+			psarUp[i] = math.NaN()
+		}
+
+		// 결과 설정
+		result[i] = SARResult{
+			SAR:       psar[i],
+			IsLong:    upTrend,
+			Timestamp: prices[i].Time,
+		}
 	}
 
-	// /* ---------- ③ (선택) TV와 동일하게 한 캔들 우측으로 밀기 ----------
-	//    TradingView 는 t-1 시점에 계산한 SAR 을 t 캔들 밑에 찍는다.
-	//    차트에 그대로 맞추고 싶다면 주석 해제.
-
-	for i := len(out) - 1; i > 0; i-- {
-		out[i] = out[i-1]
-	}
-	out[0] = SARResult{SAR: math.NaN(), IsLong: out[1].(SARResult).IsLong, Timestamp: prices[0].Time}
-	// ------------------------------------------------------------------ */
-
-	return out, nil
+	return result, nil
 }
 
 /* -------------------- 입력 검증 -------------------- */
