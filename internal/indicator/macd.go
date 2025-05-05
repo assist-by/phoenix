@@ -57,26 +57,9 @@ func (m *MACD) Calculate(prices []PriceData) ([]Result, error) {
 	shortEMARes, _ := NewEMA(m.ShortPeriod).Calculate(prices)
 	longEMARes, _ := NewEMA(m.LongPeriod).Calculate(prices)
 
-	longStart := m.LongPeriod - 1 // 첫 MACD가 존재하는 인덱스
-	macdLen := len(prices) - longStart
-	macdPD := make([]PriceData, macdLen) // MACD 값을 PriceData 형태로 저장
-
-	for i := 0; i < macdLen; i++ {
-		idx := i + longStart
-		se := shortEMARes[idx].(EMAResult)
-		le := longEMARes[idx].(EMAResult)
-		macdPD[i] = PriceData{
-			Time:  prices[idx].Time,
-			Close: se.Value - le.Value,
-		}
-	}
-
-	// -------- ② 시그널 EMA 계산 --------------------------------------
-	signalRes, _ := NewEMA(m.SignalPeriod).Calculate(macdPD)
-
-	// -------- ③ 최종 결과 조합 ---------------------------------------
+	// 미리 모든 결과를 NaN으로 초기화
 	out := make([]Result, len(prices))
-	for i := 0; i < longStart+m.SignalPeriod-1; i++ {
+	for i := 0; i < len(prices); i++ {
 		out[i] = MACDResult{
 			MACD:      math.NaN(),
 			Signal:    math.NaN(),
@@ -85,12 +68,67 @@ func (m *MACD) Calculate(prices []PriceData) ([]Result, error) {
 		}
 	}
 
-	for i := m.SignalPeriod - 1; i < macdLen; i++ {
-		priceIdx := i + longStart             // 원본 가격 인덱스
-		sig := signalRes[i].(EMAResult).Value // 시그널 값
-		macdVal := macdPD[i].Close            // MACD 값
-		out[priceIdx] = MACDResult{macdVal, sig, macdVal - sig, macdPD[i].Time}
+	// 첫 번째 유효한 MACD 값의 인덱스 (장기 EMA가 유효해지는 시점)
+	firstValidIdx := m.LongPeriod - 1
+
+	// Signal 계산용 MACD 값을 저장할 배열
+	macdValues := make([]float64, len(prices)-firstValidIdx)
+	macdTimes := make([]time.Time, len(prices)-firstValidIdx)
+
+	// MACD 값 계산 (EMA 유효한 부분부터)
+	for i := firstValidIdx; i < len(prices); i++ {
+		short := shortEMARes[i].(EMAResult).Value
+		long := longEMARes[i].(EMAResult).Value
+
+		// 둘 다 유효한 값인지 확인
+		if !math.IsNaN(short) && !math.IsNaN(long) {
+			macd := short - long
+			macdIdx := i - firstValidIdx
+
+			// MACD 값 저장
+			macdValues[macdIdx] = macd
+			macdTimes[macdIdx] = prices[i].Time
+
+			// MACD 라인 값 설정
+			macdResult := out[i].(MACDResult)
+			macdResult.MACD = macd
+			out[i] = macdResult
+		}
 	}
+
+	// Signal 계산 - 단순히 MACD 값의 EMA
+	// 여기서 MACD 값을 PriceData로 변환
+	macdPrices := make([]PriceData, len(macdValues))
+	for i, value := range macdValues {
+		macdPrices[i] = PriceData{
+			Close: value,
+			Time:  macdTimes[i],
+		}
+	}
+
+	// Signal EMA 계산
+	signalEMA := NewEMA(m.SignalPeriod)
+	signalResults, _ := signalEMA.Calculate(macdPrices)
+
+	// Signal 값과 Histogram 설정
+	signalStartIdx := m.SignalPeriod - 1
+	if signalStartIdx < 0 {
+		signalStartIdx = 0
+	}
+
+	for i := signalStartIdx; i < len(signalResults); i++ {
+		signalValue := signalResults[i].(EMAResult).Value
+		if !math.IsNaN(signalValue) {
+			realIdx := i + firstValidIdx
+			if realIdx < len(out) {
+				macdResult := out[realIdx].(MACDResult)
+				macdResult.Signal = signalValue
+				macdResult.Histogram = macdResult.MACD - signalValue
+				out[realIdx] = macdResult
+			}
+		}
+	}
+
 	return out, nil
 }
 
