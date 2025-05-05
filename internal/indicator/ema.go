@@ -45,23 +45,24 @@ func (e *EMA) Calculate(prices []PriceData) ([]Result, error) {
 	}
 
 	p := e.Period
-	multiplier := 2.0 / float64(p+1)
+	alpha := 2.0 / float64(p+1)
 	results := make([]Result, len(prices))
 
-	// --- 1. 초기 SMA ----------------------------------------------------
-	sum := 0.0
-	for i := 0; i < p; i++ {
-		sum += prices[i].Close
-		results[i] = EMAResult{Value: math.NaN(), Timestamp: prices[i].Time}
-	}
-	ema := sum / float64(p)
-	results[p-1] = EMAResult{Value: ema, Timestamp: prices[p-1].Time}
+	// 첫 값을 시작값으로 사용 (파이썬 ewm과 동일하게)
+	ema := prices[0].Close
+	results[0] = EMAResult{Value: ema, Timestamp: prices[0].Time}
 
-	// --- 2. 이후 EMA ----------------------------------------------------
-	for i := p; i < len(prices); i++ {
-		ema = (prices[i].Close-ema)*multiplier + ema
+	// 파이썬 ewm(alpha=1/window, adjust=False).mean() 방식으로 계산
+	for i := 1; i < len(prices); i++ {
+		ema = alpha*prices[i].Close + (1-alpha)*ema
 		results[i] = EMAResult{Value: ema, Timestamp: prices[i].Time}
 	}
+
+	// 항상 최소 기간 이전의 값들을 NaN으로 설정
+	for i := 0; i < p; i++ {
+		results[i] = EMAResult{Value: math.NaN(), Timestamp: prices[i].Time}
+	}
+
 	return results, nil
 }
 
