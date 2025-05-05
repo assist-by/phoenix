@@ -176,6 +176,14 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 		"SARValue":    currentSAR,
 	}
 
+	// 지표 계산 후 로깅 추가
+	log.Printf("DEBUG [%s]: price=%.2f, EMA=%.2f, MACD=%.5f, Signal=%.5f, Hist=%.5f, SAR=%.2f, isAboveEMA=%v, sarBelowCandle=%v, macdCross=%d (시간 %s)",
+		symbol, currentPrice, currentEMA, currentMACD, currentSignal, currentHistogram, currentSAR, isAboveEMA, sarBelowCandle, macdCross, lastCandle.Time)
+
+	// Long 시그널 조건 직전에 조건 로깅 추가
+	log.Printf("LONG 조건 검사 [%s]: EMA above=%v, MACD cross=%v, Histogram=%.5f (min=%.5f), SAR below=%v",
+		symbol, isAboveEMA, macdCross == 1, currentHistogram, s.minHistogram, sarBelowCandle)
+
 	// 1. 일반 시그널 조건 확인
 	// Long 시그널
 	if isAboveEMA && // EMA 200 위
@@ -191,6 +199,10 @@ func (s *MACDSAREMAStrategy) Analyze(ctx context.Context, symbol string, candles
 			symbol, currentPrice, currentEMA, currentSAR,
 			lastCandle.Time.Format("2006-01-02 15:04:05"))
 	}
+
+	// Short 시그널 조건 직전에 조건 로깅 추가
+	log.Printf("SHORT 조건 검사 [%s]: EMA below=%v, MACD cross=%v, Histogram=%.5f (min=%.5f), SAR above=%v",
+		symbol, !isAboveEMA, macdCross == -1, -currentHistogram, s.minHistogram, sarAboveCandle)
 
 	// Short 시그널
 	if !isAboveEMA && // EMA 200 아래
