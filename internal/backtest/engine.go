@@ -50,8 +50,8 @@ func NewEngine(
 	// 지표 캐시 생성
 	cache := NewIndicatorCache()
 
-	// 웜업 기간 결정 (최소 200 캔들 또는 전략에 따라 조정)
-	warmupPeriod := 200
+	// 웜업 기간 결정 (최소 300 캔들 또는 전략에 따라 조정)
+	warmupPeriod := 300
 	if len(candles) < warmupPeriod {
 		warmupPeriod = len(candles) / 4 // 데이터가 부족한 경우 25% 사용
 	}
