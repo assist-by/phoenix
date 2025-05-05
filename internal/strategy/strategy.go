@@ -26,9 +26,6 @@ type Strategy interface {
 
 	// UpdateConfig는 전략 설정을 업데이트합니다
 	UpdateConfig(config map[string]interface{}) error
-
-	// CalculateTPSL은 주어진 진입가와 시그널에 기반하여 TP/SL 가격을 계산합니다
-	CalculateTPSL(ctx context.Context, symbol string, entryPrice float64, signalType domain.SignalType, currentSAR float64, symbolInfo *domain.SymbolInfo) (stopLoss, takeProfit float64)
 }
 
 // BaseStrategy는 모든 전략 구현체에서 공통적으로 사용할 수 있는 기본 구현을 제공합니다
@@ -67,10 +64,11 @@ func (b *BaseStrategy) UpdateConfig(config map[string]interface{}) error {
 	return nil
 }
 
-// BaseStrategy에 기본 구현 추가
-func (b *BaseStrategy) CalculateTPSL(ctx context.Context, symbol string, entryPrice float64, signalType domain.SignalType, currentSAR float64, symbolInfo *domain.SymbolInfo) (stopLoss, takeProfit float64) {
-	// 하위 클래스에서 구현해야 함
-	return 0, 0
+// TPSLOptions는 TP/SL 계산에 필요한 추가 옵션들을 포함합니다
+type TPSLOptions struct {
+	// 전략별 특화 필드
+	SAR           *float64          // MACD+SAR+EMA 전략용 SAR 값 (nil 가능)
+	RecentCandles domain.CandleList // 고점/저점 계산용 최근 캔들 (더블 RSI 전략)
 }
 
 // Factory는 전략 인스턴스를 생성하는 함수 타입입니다

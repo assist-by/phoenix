@@ -284,33 +284,6 @@ func (s *MACDSAREMAStrategy) checkMACDCross(currentMACD, currentSignal, prevMACD
 	return 0 // 크로스 없음
 }
 
-// CalculateTPSL은 현재 SAR 값을 기반으로 TP/SL 가격을 계산합니다
-func (s *MACDSAREMAStrategy) CalculateTPSL(
-	ctx context.Context,
-	symbol string,
-	entryPrice float64,
-	signalType domain.SignalType,
-	currentSAR float64, // SAR 값을 파라미터로 받음
-	symbolInfo *domain.SymbolInfo, // 심볼 정보도 파라미터로 받음
-) (stopLoss, takeProfit float64) {
-	isLong := signalType == domain.Long || signalType == domain.PendingLong
-
-	// SAR 기반 손절가 및 1:1 비율 익절가 계산
-	if isLong {
-		stopLoss = domain.AdjustPrice(currentSAR, symbolInfo.TickSize, symbolInfo.PricePrecision)
-		// 1:1 비율로 익절가 설정
-		tpDistance := entryPrice - stopLoss
-		takeProfit = domain.AdjustPrice(entryPrice+tpDistance, symbolInfo.TickSize, symbolInfo.PricePrecision)
-	} else {
-		stopLoss = domain.AdjustPrice(currentSAR, symbolInfo.TickSize, symbolInfo.PricePrecision)
-		// 1:1 비율로 익절가 설정
-		tpDistance := stopLoss - entryPrice
-		takeProfit = domain.AdjustPrice(entryPrice-tpDistance, symbolInfo.TickSize, symbolInfo.PricePrecision)
-	}
-
-	return stopLoss, takeProfit
-}
-
 // RegisterStrategy는 이 전략을 레지스트리에 등록합니다
 func RegisterStrategy(registry *strategy.Registry) {
 	registry.Register("MACD+SAR+EMA", NewStrategy)
