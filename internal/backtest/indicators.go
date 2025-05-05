@@ -109,9 +109,18 @@ func CreateIndicator(spec IndicatorSpec) (indicator.Indicator, error) {
 		}
 		return indicator.NewSAR(accelInitial, accelMax), nil
 
+	case "RSI":
+		period, ok := spec.Parameters["period"].(int)
+		if !ok {
+			return nil, fmt.Errorf("RSI에는 'period' 파라미터가 필요합니다")
+		}
+		fillNaN, _ := spec.Parameters["fillNaN"].(bool) // 기본값 false
+		return indicator.NewRSI(period, fillNaN), nil
+
 	default:
 		return nil, fmt.Errorf("지원하지 않는 지표 유형: %s", spec.Type)
 	}
+
 }
 
 // CacheIndicators는 여러 지표를 한 번에 캐싱합니다
@@ -160,29 +169,52 @@ func (cache *IndicatorCache) CacheIndicators(specs []IndicatorSpec, prices []ind
 	return nil
 }
 
-// GetDefaultIndicators는 MACD+SAR+EMA 전략에 필요한 기본 지표 명세를 반환합니다
-func GetDefaultIndicators() []IndicatorSpec {
-	return []IndicatorSpec{
-		{
-			Type: "EMA",
-			Parameters: map[string]interface{}{
-				"period": 200,
+// GetDefaultIndicators는 현재 선택된 전략에 필요한 기본 지표 명세를 반환합니다
+func GetDefaultIndicators(strategyName string) []IndicatorSpec {
+	switch strategyName {
+	case "MACD+SAR+EMA":
+		return []IndicatorSpec{
+			{
+				Type: "EMA",
+				Parameters: map[string]interface{}{
+					"period": 200,
+				},
 			},
-		},
-		{
-			Type: "MACD",
-			Parameters: map[string]interface{}{
-				"shortPeriod":  12,
-				"longPeriod":   26,
-				"signalPeriod": 9,
+			{
+				Type: "MACD",
+				Parameters: map[string]interface{}{
+					"shortPeriod":  12,
+					"longPeriod":   26,
+					"signalPeriod": 9,
+				},
 			},
-		},
-		{
-			Type: "SAR",
-			Parameters: map[string]interface{}{
-				"accelerationInitial": 0.02,
-				"accelerationMax":     0.2,
+			{
+				Type: "SAR",
+				Parameters: map[string]interface{}{
+					"accelerationInitial": 0.02,
+					"accelerationMax":     0.2,
+				},
 			},
-		},
+		}
+	case "DoubleRSI":
+		return []IndicatorSpec{
+			{
+				Type: "RSI",
+				Parameters: map[string]interface{}{
+					"period": 7, // 일봉 RSI 계산용
+					"name":   "DailyRSI",
+				},
+			},
+			{
+				Type: "RSI",
+				Parameters: map[string]interface{}{
+					"period": 7, // 시간봉 RSI 계산용
+					"name":   "HourlyRSI",
+				},
+			},
+		}
+	default:
+		// 기본값으로 MACD+SAR+EMA 전략의 지표 반환
+		return GetDefaultIndicators("MACD+SAR+EMA")
 	}
 }

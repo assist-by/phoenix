@@ -164,7 +164,7 @@ func (e *Engine) prepareIndicators() error {
 	prices := indicator.ConvertCandlesToPriceData(e.Candles)
 
 	// 기본 지표 집합 가져오기
-	indicatorSpecs := GetDefaultIndicators()
+	indicatorSpecs := GetDefaultIndicators(e.Config.Backtest.Strategy)
 
 	// 지표 계산 및 캐싱
 	if err := e.IndicatorCache.CacheIndicators(indicatorSpecs, prices); err != nil {
