@@ -152,8 +152,10 @@ func (s *DoubleRSIStrategy) Analyze(ctx context.Context, symbol string, candles 
 	var dailyCandles domain.CandleList
 	dailyCandles = append(dailyCandles, *rollingDaily) // 현재 롤링 일봉 추가
 
-	// 이전 롤링 일봉 데이터 생성 (RSI 계산에 필요한 과거 데이터)
-	for i := 1; i <= s.dailyRSIPeriod; i++ {
+	// 더 많은 과거 데이터 확보 - 최소 20일 이상의 과거 데이터를 수집
+	pastDays := 25 // RSI 계산에 충분한 데이터 확보를 위해 증가
+
+	for i := 1; i <= pastDays; i++ {
 		// 24시간 간격으로 과거 시점 계산
 		pastTime := lastCandle.OpenTime.Add(-time.Duration(i*24) * time.Hour)
 
