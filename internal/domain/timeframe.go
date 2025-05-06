@@ -77,3 +77,57 @@ func ConvertHourlyToCurrentDaily(hourlyCandles CandleList, asOf time.Time) (*Can
 
 	return &dailyCandle, nil
 }
+
+// CreateRollingDaily는 주어진 시점을 기준으로 최근 N개의 시간봉으로 일봉을 생성합니다
+func CreateRollingDaily(hourlyCandles CandleList, referenceTime time.Time, hourCount int) (*Candle, error) {
+	// 기본값 설정
+	if hourCount <= 0 {
+		hourCount = 24 // 기본적으로 24시간 데이터 사용
+	}
+
+	// 레퍼런스 시간 이전의 캔들만 필터링
+	var validCandles CandleList
+	for _, candle := range hourlyCandles {
+		if !candle.OpenTime.After(referenceTime) {
+			validCandles = append(validCandles, candle)
+		}
+	}
+
+	// 충분한 데이터가 있는지 확인
+	if len(validCandles) < 2 { // 최소 2개 이상은 필요
+		return nil, fmt.Errorf("충분한 캔들 데이터가 없습니다: %d개 (최소 2개 필요)", len(validCandles))
+	}
+
+	// 최근 N 시간의 캔들만 추출
+	startIdx := len(validCandles) - hourCount
+	if startIdx < 0 {
+		startIdx = 0 // 가용 데이터가 hourCount보다 적으면 모든 데이터 사용
+	}
+	recentCandles := validCandles[startIdx:]
+
+	// 일봉 데이터 계산
+	dailyCandle := Candle{
+		Symbol:    recentCandles[0].Symbol,
+		Interval:  Interval1d,
+		OpenTime:  recentCandles[0].OpenTime,
+		CloseTime: recentCandles[len(recentCandles)-1].CloseTime,
+		Open:      recentCandles[0].Open,
+		High:      recentCandles[0].High,
+		Low:       recentCandles[0].Low,
+		Close:     recentCandles[len(recentCandles)-1].Close,
+		Volume:    0,
+	}
+
+	// 최고가, 최저가, 거래량 계산
+	for _, candle := range recentCandles {
+		if candle.High > dailyCandle.High {
+			dailyCandle.High = candle.High
+		}
+		if candle.Low < dailyCandle.Low {
+			dailyCandle.Low = candle.Low
+		}
+		dailyCandle.Volume += candle.Volume
+	}
+
+	return &dailyCandle, nil
+}

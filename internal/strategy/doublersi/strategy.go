@@ -139,60 +139,43 @@ func (s *DoubleRSIStrategy) Analyze(ctx context.Context, symbol string, candles 
 	// 심볼별 상태 가져오기
 	state := s.getSymbolState(symbol)
 
-	// 1. 현재 진행 중인 일봉 생성
+	// 최신 캔들 시간
 	lastCandle := candles[len(candles)-1]
-	dailyCandle, err := domain.ConvertHourlyToCurrentDaily(candles, lastCandle.OpenTime)
+
+	// 1. 롤링 일봉 생성 - 현재 시점 기준 최근 24시간 데이터 사용
+	rollingDaily, err := domain.CreateRollingDaily(candles, lastCandle.OpenTime, 24)
 	if err != nil {
-		return nil, fmt.Errorf("일봉 데이터 생성 실패: %w", err)
+		return nil, fmt.Errorf("롤링 일봉 데이터 생성 실패: %w", err)
 	}
 
-	// 2. 일봉 데이터 준비 (최소 dailyRSIPeriod+1개 필요)
-	// 현재 시간까지의 일봉 데이터를 수집
+	// 2. 일봉 데이터 준비 - 롤링 일봉 사용
 	var dailyCandles domain.CandleList
-	dailyCandles = append(dailyCandles, *dailyCandle) // 현재 진행 중인 일봉 추가
+	dailyCandles = append(dailyCandles, *rollingDaily) // 현재 롤링 일봉 추가
 
-	// 과거 일봉 데이터 수집
-	currentTime := lastCandle.OpenTime
-	startDate := time.Date(
-		currentTime.Year(), currentTime.Month(), currentTime.Day(),
-		0, 0, 0, 0, currentTime.Location(),
-	)
-
-	// 1일씩 이전으로 이동하며 일봉 생성
+	// 이전 롤링 일봉 데이터 생성 (RSI 계산에 필요한 과거 데이터)
 	for i := 1; i <= s.dailyRSIPeriod; i++ {
-		prevDate := startDate.AddDate(0, 0, -i)
+		// 24시간 간격으로 과거 시점 계산
+		pastTime := lastCandle.OpenTime.Add(-time.Duration(i*24) * time.Hour)
 
-		// 해당 날짜의 캔들만 추출
-		dayCandles := []domain.Candle{}
-		for _, c := range candles {
-			candleDate := time.Date(
-				c.OpenTime.Year(), c.OpenTime.Month(), c.OpenTime.Day(),
-				0, 0, 0, 0, c.OpenTime.Location(),
-			)
-			if candleDate.Equal(prevDate) {
-				dayCandles = append(dayCandles, c)
-			}
+		// 해당 과거 시점까지의 데이터로 롤링 일봉 생성
+		pastDaily, err := domain.CreateRollingDaily(candles, pastTime, 24)
+		if err != nil {
+			// 과거 데이터가 부족할 수 있으므로 에러는 무시하고 가용한 데이터만 사용
+			continue
 		}
 
-		// 해당 날짜의 캔들이 있으면 일봉으로 변환 추가
-		if len(dayCandles) > 0 {
-			// 정렬 (시간순)
-			sort.Slice(dayCandles, func(i, j int) bool {
-				return dayCandles[i].OpenTime.Before(dayCandles[j].OpenTime)
-			})
-
-			// 마지막 캔들 시간 기준으로 일봉 생성
-			completedCandle, err := domain.ConvertHourlyToCurrentDaily(dayCandles, dayCandles[len(dayCandles)-1].OpenTime)
-			if err == nil && completedCandle != nil {
-				dailyCandles = append(dailyCandles, *completedCandle)
-			}
-		}
+		dailyCandles = append(dailyCandles, *pastDaily)
 	}
 
 	// 날짜 역순으로 추가된 캔들을 날짜순으로 정렬
 	sort.Slice(dailyCandles, func(i, j int) bool {
 		return dailyCandles[i].OpenTime.Before(dailyCandles[j].OpenTime)
 	})
+
+	log.Printf("롤링 일봉 데이터: %d개 생성됨, 첫 번째: %s, 마지막: %s",
+		len(dailyCandles),
+		dailyCandles[0].OpenTime.Format("2006-01-02 15:04:05"),
+		dailyCandles[len(dailyCandles)-1].CloseTime.Format("2006-01-02 15:04:05"))
 
 	// 3. 지표 계산용 데이터 형식으로 변환
 	hourlyPrices := indicator.ConvertCandlesToPriceData(candles)
@@ -234,8 +217,8 @@ func (s *DoubleRSIStrategy) Analyze(ctx context.Context, symbol string, candles 
 	var stopLoss, takeProfit float64
 
 	// 시장 상태 로깅
-	log.Printf("[%s] - 현재 상태: 가격=%.2f, 일봉 RSI=%.2f, 시간봉 RSI=%.2f (이전: %.2f)",
-		symbol, currentPrice, currentDailyRSI, currentHourlyRSI, prevHourlyRSI)
+	log.Printf("[%s] - 현재 상태: 가격=%.2f, 일봉 RSI=%.2f, 시간봉 RSI=%.2f (이전: %.2f) (시간: %s)",
+		symbol, currentPrice, currentDailyRSI, currentHourlyRSI, prevHourlyRSI, lastCandle.OpenTime.Format("2006-01-02 15:04:05"))
 
 	// 6.1 롱 시그널 조건
 	longCondition := (currentDailyRSI > s.dailyRSIUpperBand) && // 일봉 RSI > 60
